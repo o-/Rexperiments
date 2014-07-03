@@ -241,7 +241,7 @@ static void R_ReportNewPage();
     gc_inhibit_release = __release__;		   \
 }  while(0)
 
-static void R_gc_internal(R_size_t size_needed);
+static void R_gc_internal(R_size_t size_needed, int class);
 static void R_gc_full(R_size_t size_needed);
 static void mem_err_heap(R_size_t size);
 static void mem_err_malloc(R_size_t size);
@@ -682,12 +682,13 @@ static R_size_t R_NodesInUse = 0;
 #define FORWARD_NODE(s) do { \
   SEXP fn__n__ = (s); \
   if (fn__n__ && ! NODE_IS_MARKED(fn__n__)) { \
+    if (NODE_CLASS(fn__n__)>=class_start && NODE_CLASS(fn__n__)<class_end){ \
     CHECK_FOR_FREE_NODE(fn__n__) \
     MARK_NODE(fn__n__); \
     UNSNAP_NODE(fn__n__); \
     SET_NEXT_NODE(fn__n__, forwarded_nodes); \
     forwarded_nodes = fn__n__; \
-  } \
+  }} \
 } while (0)
 
 #define FC_FORWARD_NODE(__n__,__dummy__) FORWARD_NODE(__n__)
@@ -863,6 +864,10 @@ static void GetNewPage(int node_class)
     R_GenHeap[node_class].pages = page;
     R_GenHeap[node_class].PageCount++;
 
+   // printf("Allocating new Page of size %d for %d nodes of type %d \
+   //     (total pages:%d)\n", R_PAGE_SIZE, page_count, node_class,
+   //     R_GenHeap[node_class].PageCount);
+
     data = PAGE_DATA(page);
     base = R_GenHeap[node_class].New;
     for (i = 0; i < page_count; i++, data += node_size) {
@@ -945,6 +950,7 @@ static void TryToReleasePages(void)
 		    }
 		}
 		if (! in_use) {
+                   // printf("Releasing a Page of type %d\n", i);
 		    ReleasePage(page, i);
 		    if (last == NULL)
 			R_GenHeap[i].pages = next;
@@ -1171,6 +1177,10 @@ static void SortNodes(void)
 
 	SET_NEXT_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
 	SET_PREV_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
+	SET_NEXT_NODE(R_GenHeap[i].Old[0], R_GenHeap[i].Old[0]);
+	SET_PREV_NODE(R_GenHeap[i].Old[0], R_GenHeap[i].Old[0]);
+	SET_NEXT_NODE(R_GenHeap[i].Old[1], R_GenHeap[i].Old[1]);
+	SET_PREV_NODE(R_GenHeap[i].Old[1], R_GenHeap[i].Old[1]);
 	for (page = R_GenHeap[i].pages; page != NULL; page = page->next) {
 	    int j;
 	    char *data = PAGE_DATA(page);
@@ -1179,6 +1189,8 @@ static void SortNodes(void)
 		s = (SEXP) data;
 		if (! NODE_IS_MARKED(s))
 		    SNAP_NODE(s, R_GenHeap[i].New);
+		else
+		    SNAP_NODE(s, R_GenHeap[i].Old[NODE_GENERATION(s)]);
 	    }
 	}
 	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
@@ -1481,25 +1493,41 @@ SEXP attribute_hidden do_regFinaliz(SEXP call, SEXP op, SEXP args, SEXP rho)
     return R_NilValue;
 }
 
-
 /* The Generational Collector. */
+static void process_nodes(SEXP forwarded_nodes, int g, int class_start, int class_end) {
+    while (forwarded_nodes != NULL) {
+        SEXP s = forwarded_nodes;
+	if (*(double*)DATAPTR(s) == 666.0) {
+		printf("%p >>> %p\n", s, (double*)DATAPTR(s));
+		__asm("int3");
+	}
+        forwarded_nodes = NEXT_NODE(forwarded_nodes);
+        int gen = NODE_GENERATION(s);
+	if(gen > g)
+	    printf("%d - %d\n", g, gen);
+        SNAP_NODE(s, R_GenHeap[NODE_CLASS(s)].Old[gen]);
+        R_GenHeap[NODE_CLASS(s)].OldCount[gen]++;
+        FORWARD_CHILDREN(s);
+    }
+}
 
-#define PROCESS_NODES() do { \
-    while (forwarded_nodes != NULL) { \
-	s = forwarded_nodes; \
-	forwarded_nodes = NEXT_NODE(forwarded_nodes); \
-	SNAP_NODE(s, R_GenHeap[NODE_CLASS(s)].Old[NODE_GENERATION(s)]); \
-	R_GenHeap[NODE_CLASS(s)].OldCount[NODE_GENERATION(s)]++; \
-	FORWARD_CHILDREN(s); \
-    } \
-} while (0)
-
-static void RunGenCollect(R_size_t size_needed)
+static void RunGenCollect(R_size_t size_needed, int node_type)
 {
     int i, gen, gens_collected;
     RCNTXT *ctxt;
     SEXP s;
     SEXP forwarded_nodes;
+
+    int class_start, class_end;
+    if (node_type != 1) {
+	printf("collecting all classes\n");
+	class_start = 0;
+	class_end   = NUM_NODE_CLASSES;
+    } else {
+	printf("collecting classes %d\n", node_type);
+	class_start = node_type;
+        class_end   = node_type+1;
+    }
 
     bad_sexp_type_seen = 0;
 
@@ -1524,7 +1552,7 @@ static void RunGenCollect(R_size_t size_needed)
     /* eliminate old-to-new references in generations to collect by
        transferring referenced nodes to referring generation */
     for (gen = 0; gen < num_old_gens_to_collect; gen++) {
-	for (i = 0; i < NUM_NODE_CLASSES; i++) {
+	for (i = class_start; i < class_end; i++) {
 	    s = NEXT_NODE(R_GenHeap[i].OldToNew[gen]);
 	    while (s != R_GenHeap[i].OldToNew[gen]) {
 		SEXP next = NEXT_NODE(s);
@@ -1543,20 +1571,20 @@ static void RunGenCollect(R_size_t size_needed)
 
     /* unmark all marked nodes in old generations to be collected and
        move to New space */
-    for (gen = 0; gen < num_old_gens_to_collect; gen++) {
-	for (i = 0; i < NUM_NODE_CLASSES; i++) {
-	    R_GenHeap[i].OldCount[gen] = 0;
-	    s = NEXT_NODE(R_GenHeap[i].Old[gen]);
-	    while (s != R_GenHeap[i].Old[gen]) {
-		SEXP next = NEXT_NODE(s);
-		if (gen < NUM_OLD_GENERATIONS - 1)
-		    SET_NODE_GENERATION(s, gen + 1);
-		UNMARK_NODE(s);
-		s = next;
-	    }
-	    if (NEXT_NODE(R_GenHeap[i].Old[gen]) != R_GenHeap[i].Old[gen])
-		BULK_MOVE(R_GenHeap[i].Old[gen], R_GenHeap[i].New);
-	}
+    for (gen = num_old_gens_to_collect-1; gen >= 0; gen--) {
+        for (i = class_start; i < class_end; i++) {
+            R_GenHeap[i].OldCount[gen] = 0;
+            s = NEXT_NODE(R_GenHeap[i].Old[gen]);
+            while (s != R_GenHeap[i].Old[gen]) {
+        	SEXP next = NEXT_NODE(s);
+                if (gen < NUM_OLD_GENERATIONS - 1)
+                   SET_NODE_GENERATION(s, gen + 1);
+        	UNMARK_NODE(s);
+        	s = next;
+            }
+            if (NEXT_NODE(R_GenHeap[i].Old[gen]) != R_GenHeap[i].Old[gen])
+        	BULK_MOVE(R_GenHeap[i].Old[gen], R_GenHeap[i].New);
+        }
     }
 
     forwarded_nodes = NULL;
@@ -1564,7 +1592,7 @@ static void RunGenCollect(R_size_t size_needed)
 #ifndef EXPEL_OLD_TO_NEW
     /* scan nodes in uncollected old generations with old-to-new pointers */
     for (gen = num_old_gens_to_collect; gen < NUM_OLD_GENERATIONS; gen++)
-	for (i = 0; i < NUM_NODE_CLASSES; i++)
+	for (i = class_start; i < class_end; i++)
 	    for (s = NEXT_NODE(R_GenHeap[i].OldToNew[gen]);
 		 s != R_GenHeap[i].OldToNew[gen];
 		 s = NEXT_NODE(s))
@@ -1633,7 +1661,8 @@ static void RunGenCollect(R_size_t size_needed)
 	FORWARD_NODE(*sp);
 
     /* main processing loop */
-    PROCESS_NODES();
+    process_nodes(forwarded_nodes, num_old_gens_to_collect, class_start, class_end);
+    forwarded_nodes = NULL;
 
     /* identify weakly reachable nodes */
     {
@@ -1652,7 +1681,8 @@ static void RunGenCollect(R_size_t size_needed)
 		    }
 		}
 	    }
-	    PROCESS_NODES();
+	    process_nodes(forwarded_nodes, num_old_gens_to_collect, class_start, class_end);
+	    forwarded_nodes = NULL;
 	} while (recheck_weak_refs);
     }
 
@@ -1666,7 +1696,8 @@ static void RunGenCollect(R_size_t size_needed)
 	FORWARD_NODE(WEAKREF_VALUE(s));
 	FORWARD_NODE(WEAKREF_FINALIZER(s));
     }
-    PROCESS_NODES();
+    //process_nodes(forwarded_nodes);
+    //forwarded_nodes = NULL;
 
     DEBUG_CHECK_NODE_COUNTS("after processing forwarded list");
 
@@ -1697,7 +1728,8 @@ static void RunGenCollect(R_size_t size_needed)
 	SET_TRUELENGTH(R_StringHash, nc); /* SET_HASHPRI, really */
     }
     FORWARD_NODE(R_StringHash);
-    PROCESS_NODES();
+    process_nodes(forwarded_nodes, num_old_gens_to_collect, class_start, class_end);
+    forwarded_nodes = NULL;
 
 #ifdef PROTECTCHECK
     for(i=0; i< NUM_SMALL_NODE_CLASSES;i++){
@@ -1737,8 +1769,10 @@ static void RunGenCollect(R_size_t size_needed)
 	    s = next;
 	}
     }
-    if (gc_inhibit_release)
-	PROCESS_NODES();
+    if (gc_inhibit_release) {
+	process_nodes(forwarded_nodes, num_old_gens_to_collect, class_start, class_end);
+	forwarded_nodes = NULL;
+    }
 #endif
 
     /* release large vector allocations */
@@ -1766,7 +1800,7 @@ static void RunGenCollect(R_size_t size_needed)
 #endif
 
     /* reset Free pointers */
-    for (i = 0; i < NUM_NODE_CLASSES; i++)
+    for (i = class_start; i < class_end; i++)
 	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
 
 
@@ -1776,7 +1810,7 @@ static void RunGenCollect(R_size_t size_needed)
     for (gen = 0; gen < NUM_OLD_GENERATIONS; gen++) {
 	for (i = 1; i < NUM_SMALL_NODE_CLASSES; i++)
 	    R_SmallVallocSize += R_GenHeap[i].OldCount[gen] * NodeClassSize[i];
-	for (i = 0; i < NUM_NODE_CLASSES; i++)
+	for (i = class_start; i < class_end; i++)
 	    R_Collected -= R_GenHeap[i].OldCount[gen];
     }
     R_NodesInUse = R_NSize - R_Collected;
@@ -1816,6 +1850,15 @@ static void RunGenCollect(R_size_t size_needed)
 	REprintf(" (level %d) ... ", gens_collected);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
     }
+
+    //if (num_old_gens_to_collect > 0) {
+    //for (i = 0; i < NUM_NODE_CLASSES; i++) {
+    //  printf("type %d\n",i);
+    //  for (gen = 0; gen < num_old_gens_to_collect; gen++) {
+    //    printf("gen %d : %d\n", gen, R_GenHeap[i].OldCount[gen]);
+    //  }
+    //}
+    //}
 }
 
 /* public interface for controlling GC torture settings */
@@ -2164,7 +2207,7 @@ SEXP allocSExp(SEXPTYPE t)
 {
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
+	R_gc_internal(0, 0);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
     }
@@ -2188,7 +2231,7 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
 {
     SEXP s;
     if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
+	R_gc_internal(0, 0);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
     }
@@ -2214,7 +2257,7 @@ SEXP cons(SEXP car, SEXP cdr)
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(car);
 	PROTECT(cdr);
-	R_gc_internal(0);
+	R_gc_internal(0, 0);
 	UNPROTECT(2);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
@@ -2241,7 +2284,7 @@ SEXP CONS_NR(SEXP car, SEXP cdr)
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(car);
 	PROTECT(cdr);
-	R_gc_internal(0);
+	R_gc_internal(0, 0);
 	UNPROTECT(2);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
@@ -2289,7 +2332,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 	PROTECT(namelist);
 	PROTECT(valuelist);
 	PROTECT(rho);
-	R_gc_internal(0);
+	R_gc_internal(0, -1);
 	UNPROTECT(3);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
@@ -2326,7 +2369,7 @@ SEXP attribute_hidden mkPROMISE(SEXP expr, SEXP rho)
     if (FORCE_GC || NO_FREE_NODES()) {
 	PROTECT(expr);
 	PROTECT(rho);
-	R_gc_internal(0);
+	R_gc_internal(0, 0);
 	UNPROTECT(2);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
@@ -2419,7 +2462,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    node_class = 1;
 	    alloc_size = NodeClassSize[1];
 	    if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-		R_gc_internal(alloc_size);
+		R_gc_internal(alloc_size, node_class);
 		if (NO_FREE_NODES())
 		    mem_err_cons();
 		if (VHEAP_FREE() < alloc_size)
@@ -2575,7 +2618,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 
     /* we need to do the gc here so allocSExp doesn't! */
     if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-	R_gc_internal(alloc_size);
+	R_gc_internal(alloc_size, node_class);
 	if (NO_FREE_NODES())
 	    mem_err_cons();
 	if (VHEAP_FREE() < alloc_size)
@@ -2748,13 +2791,13 @@ SEXP allocS4Object(void)
 
 void R_gc(void)
 {
-    R_gc_internal(0);
+    R_gc_internal(0,-1);
 }
 
 static void R_gc_full(R_size_t size_needed)
 {
     num_old_gens_to_collect = NUM_OLD_GENERATIONS;
-    R_gc_internal(size_needed);
+    R_gc_internal(size_needed,-1);
 }
 
 extern double R_getClockIncrement(void);
@@ -2813,7 +2856,7 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
-static void R_gc_internal(R_size_t size_needed)
+static void R_gc_internal(R_size_t size_needed, int node_type)
 {
     R_size_t onsize = R_NSize /* can change during collection */;
     double ncells, vcells, vfrac, nfrac;
@@ -2837,7 +2880,7 @@ static void R_gc_internal(R_size_t size_needed)
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
 	gc_start_timing();
-	RunGenCollect(size_needed);
+	RunGenCollect(size_needed, node_type);
 	gc_end_timing();
 	R_in_gc = FALSE;
     } END_SUSPEND_INTERRUPTS;
