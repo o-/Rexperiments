@@ -18,6 +18,9 @@
  *  http://www.r-project.org/Licenses/
  */
 
+#include "gc.h"
+
+
 /*
  *	This code implements a non-moving generational collector
  *      with two or three generations.
@@ -709,14 +712,10 @@ static R_size_t R_NodesInUse = 0;
 /* Node Allocation. */
 
 #define CLASS_GET_FREE_NODE(c,s) do { \
-  SEXP __n__ = R_GenHeap[c].Free; \
-  if (__n__ == R_GenHeap[c].New) { \
-    GetNewPage(c); \
-    __n__ = R_GenHeap[c].Free; \
-  } \
-  R_GenHeap[c].Free = NEXT_NODE(__n__); \
-  R_NodesInUse++; \
-  (s) = __n__; \
+  (s) = GC_MALLOC(NODE_SIZE(c)+40); \
+  (s)->sxpinfo = UnmarkedNodeTemplate.sxpinfo; \
+  INIT_REFCNT(s); \
+  SET_NODE_CLASS((s), c); \
 } while (0)
 
 #define NO_FREE_NODES() (R_NodesInUse >= R_NSize)
@@ -2609,7 +2608,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    if (size < (R_SIZE_T_MAX / sizeof(VECREC)) - hdrsize) { /*** not sure this test is quite right -- why subtract the header? LT */
 		mem = allocator ?
 		    custom_node_alloc(allocator, hdrsize + size * sizeof(VECREC)) : 
-		    malloc(hdrsize + size * sizeof(VECREC));
+		    GC_MALLOC(hdrsize + size * sizeof(VECREC));
 		if (mem == NULL) {
 		    /* If we are near the address space limit, we
 		       might be short of address space.  So return

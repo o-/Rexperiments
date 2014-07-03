@@ -46,7 +46,7 @@ LIBM = @LIBM@
 LIBR0 = @LIBR0@
 LIBR1 = @LIBR1@
 LIBR = @LIBR0@ @LIBR1@
-LIBS = @LIBS@
+LIBS = @LIBS@ -lgc
 LIBnn = @LIBnn@
 LIBTOOL = @LIBTOOL@
 ## AFAICS unused
