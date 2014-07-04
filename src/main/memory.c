@@ -1481,6 +1481,46 @@ SEXP attribute_hidden do_regFinaliz(SEXP call, SEXP op, SEXP args, SEXP rho)
     return R_NilValue;
 }
 
+#define PRINT_IF_PARENT(child, _) \
+  if (child == ptr) \
+    do_inspect(NULL, NULL, CONS(s, R_NilValue), NULL);
+
+static void FindParents(SEXP ptr) {
+    for (int i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
+	PAGE_HEADER *page;
+	int node_size = NODE_SIZE(i);
+	int page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
+	for (page = R_GenHeap[i].pages; page != NULL; page = page->next) {
+	    char *data = PAGE_DATA(page);
+	    for (int j = 0; j < page_count; j++, data += node_size) {
+		SEXP s = (SEXP) data;
+		if (TYPEOF(s) != NEWSXP && TYPEOF(s) != FREESXP) {
+                    DO_CHILDREN(s,PRINT_IF_PARENT, 0);
+                }
+	    }
+	}
+    }
+    puts("");
+}
+
+static void FindGeneration(SEXP ptr) {
+  int class = NODE_CLASS(ptr);
+  while(1) {
+    ptr = ptr->gengc_next_node;
+    if(ptr == R_GenHeap[class].Old[0])
+        return puts("Old[0]");
+    if(ptr == R_GenHeap[class].Old[1])
+        return puts("Old[1]");
+    if(ptr == R_GenHeap[class].OldToNew[0])
+        return puts("OldToNew[0]");
+    if(ptr == R_GenHeap[class].OldToNew[1])
+        return puts("OldToNew[1]");
+    if(ptr == R_GenHeap[class].New)
+        return puts("New");
+  }
+}
+
+
 
 /* The Generational Collector. */
 
@@ -1809,13 +1849,21 @@ static void RunGenCollect(R_size_t size_needed)
 	SortNodes();
 #endif
 
-    if (gc_reporting) {
+//    if (gc_reporting) {
 	REprintf("Garbage collection %d = %d", gc_count, gen_gc_counts[0]);
 	for (i = 0; i < NUM_OLD_GENERATIONS; i++)
 	    REprintf("+%d", gen_gc_counts[i + 1]);
-	REprintf(" (level %d) ... ", gens_collected);
+	REprintf(" (level %d)\n", gens_collected);
+	REprintf("0:[%02d, %d] 1:[%02d, %d] 2:[%02d, %d] 4:[%02d, %d] 8:[%02d, %d] 16:[%02d, %d] n:[%02d, %d]\n",
+            R_GenHeap[0].OldCount[0], R_GenHeap[0].OldCount[1],
+            R_GenHeap[1].OldCount[0], R_GenHeap[1].OldCount[1],
+            R_GenHeap[2].OldCount[0], R_GenHeap[2].OldCount[1],
+            R_GenHeap[3].OldCount[0], R_GenHeap[3].OldCount[1],
+            R_GenHeap[4].OldCount[0], R_GenHeap[4].OldCount[1],
+            R_GenHeap[5].OldCount[0], R_GenHeap[5].OldCount[1],
+            R_GenHeap[7].OldCount[0], R_GenHeap[7].OldCount[1]);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
-    }
+ //   }
 }
 
 /* public interface for controlling GC torture settings */

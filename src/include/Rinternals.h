@@ -174,7 +174,7 @@ typedef enum {
  */
 
 /* Flags */
-struct sxpinfo_struct {
+typedef struct sxpinfo_struct {
     SEXPTYPE type      :  5;/* ==> (FUNSXP == 99) %% 2^5 == 3 == CLOSXP
 			     * -> warning: `type' is narrower than values
 			     *              of its type
@@ -188,7 +188,7 @@ struct sxpinfo_struct {
     unsigned int spare :  1;  /* currently unused */
     unsigned int gcgen :  1;  /* old generation number */
     unsigned int gccls :  3;  /* node class */
-}; /*		    Tot: 32 */
+} sxpinfo_struct; /*		    Tot: 32 */
 
 struct vecsxp_struct {
     R_len_t	length;
@@ -1294,7 +1294,6 @@ SEXP R_FixupRHS(SEXP x, SEXP y);
 	    R_SignalCStackOverflow(usage);					\
     } while (FALSE)
 #endif
-
 
 #ifdef __cplusplus
 }

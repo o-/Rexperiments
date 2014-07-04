@@ -1931,3 +1931,8 @@ tests/simple-true.Rout
 tests/tools.Rcheck/
 tests/utf8-regex.Rout
 tools/Makefile
+acinclude.m4
+aclocal.m4
+autom4te.cache/
+*.swp
+
