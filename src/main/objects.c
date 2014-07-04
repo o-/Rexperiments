@@ -31,6 +31,8 @@
 #include <Internal.h>
 #include <R_ext/RS.h> /* for Calloc, Realloc and for S4 object bit */
 
+#include <gc.h>
+
 static SEXP GetObject(RCNTXT *cptr)
 {
     SEXP s, sysp, b, formals, funcall, tag;
@@ -1175,9 +1177,9 @@ static int maxMethodsOffset = 0, curMaxOffset;
 static Rboolean allowPrimitiveMethods = TRUE;
 typedef enum {NO_METHODS, NEEDS_RESET, HAS_METHODS, SUPPRESSED} prim_methods_t;
 
-static prim_methods_t *prim_methods;
-static SEXP *prim_generics;
-static SEXP *prim_mlist;
+prim_methods_t *prim_methods;
+SEXP *prim_generics;
+SEXP *prim_mlist;
 #define DEFAULT_N_PRIM_METHODS 100
 
 /* This is used in the methods package, in src/methods_list_dispatch.c */
@@ -1275,16 +1277,26 @@ SEXP do_set_prim_method(SEXP op, const char *code_string, SEXP fundef,
 	if(prim_methods) {
 	    int i;
 
-	    prim_methods  = Realloc(prim_methods,  n, prim_methods_t);
-	    prim_generics = Realloc(prim_generics, n, SEXP);
-	    prim_mlist	  = Realloc(prim_mlist,	   n, SEXP);
+	    prim_methods_t * prim_methods_n  = malloc(n * sizeof(prim_methods_t));
+	    SEXP * prim_generics_n = malloc(n * sizeof(SEXP));
+	    SEXP * prim_mlist_n    = malloc(n * sizeof(SEXP));
 
 	    /* Realloc does not clear the added memory, hence: */
 	    for (i = maxMethodsOffset ; i < n ; i++) {
-		prim_methods[i]	 = NO_METHODS;
-		prim_generics[i] = NULL;
-		prim_mlist[i]	 = NULL;
+                if (i >= maxMethodsOffset) {
+		    prim_methods_n[i]	 = NO_METHODS;
+		    prim_generics_n[i] = NULL;
+		    prim_mlist_n[i]	 = NULL;
+                } else {
+                    prim_methods_n[i]  = prim_methods[i];
+                    prim_generics_n[i] = prim_generics[i];
+                    prim_mlist_n[i]    = prim_mlist[i];
+                }
 	    }
+
+            prim_methods = prim_methods_n;
+            prim_generics = prim_generics_n;
+            prim_mlist = prim_mlist_n;
 	}
 	else {
 	    prim_methods  = Calloc(n, prim_methods_t);

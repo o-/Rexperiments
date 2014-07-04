@@ -18,6 +18,7 @@
  *  http://www.r-project.org/Licenses/
  */
 
+#define LARGE_CONFIG
 #include "gc.h"
 
 
@@ -97,6 +98,12 @@ extern void *Rm_realloc(void * p, size_t n);
 #define realloc Rm_realloc
 #define free Rm_free
 #endif
+
+
+#include <gc.h>
+#define calloc(a, b) GC_MALLOC((a)*(b))
+#define malloc GC_MALLOC
+#define free(a) GC_FREE(a)
 
 /* malloc uses size_t.  We are assuming here that size_t is at least
    as large as unsigned long.  Changed from int at 1.6.0 to (i) allow
@@ -714,6 +721,7 @@ static R_size_t R_NodesInUse = 0;
 #define CLASS_GET_FREE_NODE(c,s) do { \
   (s) = GC_MALLOC(NODE_SIZE(c)+40); \
   (s)->sxpinfo = UnmarkedNodeTemplate.sxpinfo; \
+  (s)->u.symsxp.pname = (void*)0xdead; \
   INIT_REFCNT(s); \
   SET_NODE_CLASS((s), c); \
 } while (0)
@@ -1495,6 +1503,7 @@ SEXP attribute_hidden do_regFinaliz(SEXP call, SEXP op, SEXP args, SEXP rho)
 
 static void RunGenCollect(R_size_t size_needed)
 {
+  return;
     int i, gen, gens_collected;
     RCNTXT *ctxt;
     SEXP s;
@@ -2162,11 +2171,6 @@ char *S_realloc(char *p, long new, long old, int size)
 SEXP allocSExp(SEXPTYPE t)
 {
     SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(s);
     s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
     INIT_REFCNT(s);
@@ -2186,11 +2190,6 @@ SEXP allocSExp(SEXPTYPE t)
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
     SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	R_gc_internal(0);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(s);
     s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
     INIT_REFCNT(s);
@@ -2210,14 +2209,6 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
 SEXP cons(SEXP car, SEXP cdr)
 {
     SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(s);
 #if VALGRIND_LEVEL > 2
     VALGRIND_MAKE_WRITABLE(&ATTRIB(s), sizeof(void *));
@@ -2237,14 +2228,6 @@ SEXP cons(SEXP car, SEXP cdr)
 SEXP CONS_NR(SEXP car, SEXP cdr)
 {
     SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(car);
-	PROTECT(cdr);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(s);
 #if VALGRIND_LEVEL > 2
     VALGRIND_MAKE_WRITABLE(&ATTRIB(s), sizeof(void *));
@@ -2284,15 +2267,6 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
     SEXP v, n, newrho;
 
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(namelist);
-	PROTECT(valuelist);
-	PROTECT(rho);
-	R_gc_internal(0);
-	UNPROTECT(3);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(newrho);
 #if VALGRIND_LEVEL > 2
     VALGRIND_MAKE_WRITABLE(&ATTRIB(newrho), sizeof(void *));
@@ -2322,14 +2296,6 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 SEXP attribute_hidden mkPROMISE(SEXP expr, SEXP rho)
 {
     SEXP s;
-    if (FORCE_GC || NO_FREE_NODES()) {
-	PROTECT(expr);
-	PROTECT(rho);
-	R_gc_internal(0);
-	UNPROTECT(2);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-    }
     GET_FREE_NODE(s);
 #if VALGRIND_LEVEL > 2
     VALGRIND_MAKE_WRITABLE(&ATTRIB(s), sizeof(void *));
@@ -2417,13 +2383,6 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	case LGLSXP:
 	    node_class = 1;
 	    alloc_size = NodeClassSize[1];
-	    if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-		R_gc_internal(alloc_size);
-		if (NO_FREE_NODES())
-		    mem_err_cons();
-		if (VHEAP_FREE() < alloc_size)
-		    mem_err_heap(size);
-	    }
 
 	    CLASS_GET_FREE_NODE(node_class, s);
 #if VALGRIND_LEVEL > 2
@@ -2571,15 +2530,6 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 
     /* save current R_VSize to roll back adjustment if malloc fails */
     old_R_VSize = R_VSize;
-
-    /* we need to do the gc here so allocSExp doesn't! */
-    if (FORCE_GC || NO_FREE_NODES() || VHEAP_FREE() < alloc_size) {
-	R_gc_internal(alloc_size);
-	if (NO_FREE_NODES())
-	    mem_err_cons();
-	if (VHEAP_FREE() < alloc_size)
-	    mem_err_heap(size);
-    }
 
     if (size > 0) {
 	if (node_class < NUM_SMALL_NODE_CLASSES) {
@@ -3153,7 +3103,14 @@ void *R_chk_realloc(void *ptr, size_t size)
 {
     void *p;
     /* Protect against broken realloc */
-    if(ptr) p = realloc(ptr, size); else p = malloc(size);
+    if(ptr) {
+      void *n = GC_MALLOC(size);
+      memcpy(n, p, size);
+      p = n;
+//      p = realloc(ptr, size);
+    } else {
+      p = malloc(size);
+    }
     if(!p)
 	error(_("'Realloc' could not re-allocate memory (%.0f bytes)"), 
 	      (double) size);

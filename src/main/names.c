@@ -33,6 +33,8 @@
 
 #include <Rinterface.h>
 
+#include <gc.h>
+
 /* Table of  .Internal(.) and .Primitive(.)  R functions
  * =====     =========	      ==========
  *
@@ -1088,7 +1090,7 @@ static void SymbolShortcuts(void)
 void attribute_hidden InitNames()
 {
     /* allocate the symbol table */
-    if (!(R_SymbolTable = (SEXP *) calloc(HSIZE, sizeof(SEXP))))
+    if (!(R_SymbolTable = (SEXP *) GC_MALLOC(HSIZE * sizeof(SEXP))))
 	R_Suicide("couldn't allocate memory for symbol table");
 
     /* R_UnboundValue */
