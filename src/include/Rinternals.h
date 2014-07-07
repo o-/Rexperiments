@@ -245,8 +245,7 @@ struct promsxp_struct {
 
 #define SEXPREC_HEADER \
     struct sxpinfo_struct sxpinfo; \
-    struct SEXPREC *attrib; \
-    struct SEXPREC *gengc_next_node, *gengc_prev_node
+    struct SEXPREC *attrib
 
 /* The standard node structure consists of a header followed by the
    node data. */
