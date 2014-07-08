@@ -29,6 +29,8 @@
 
 #define USE_RINTERNALS
 
+#define PRECIOUS_BITS 9
+#define PHSIZE 512
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -36,6 +38,10 @@
 
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
+
+#include <time.h>
+
+clock_t start, preserve_time;
 
 /* Declarations for Valgrind.
 
@@ -432,7 +438,7 @@ void attribute_hidden R_SetPPSize(R_size_t size)
 /* Miscellaneous Globals. */
 
 static SEXP R_VStack = NULL;		/* R_alloc stack pointer */
-static SEXP R_PreciousList = NULL;      /* List of Persistent Objects */
+static SEXP* R_PreciousList = NULL;      /* List of Persistent Objects */
 static R_size_t R_LargeVallocSize = 0;
 static R_size_t R_SmallVallocSize = 0;
 static R_size_t orig_R_NSize;
@@ -1662,7 +1668,8 @@ static void RunGenCollect(R_size_t size_needed)
 	FORWARD_NODE(ctxt->srcref);	   /* the current source reference */
     }
 
-    FORWARD_NODE(R_PreciousList);
+    for (i = 0; i < PHSIZE; i++)
+        FORWARD_NODE(R_PreciousList[i]);
 
     for (i = 0; i < R_PPStackTop; i++)	   /* Protected pointers */
 	FORWARD_NODE(R_PPStack[i]);
@@ -1864,6 +1871,8 @@ static void RunGenCollect(R_size_t size_needed)
             R_GenHeap[7].OldCount[0], R_GenHeap[7].OldCount[1]);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
     }
+
+    printf( "Number of seconds: %f\n", preserve_time/(double)CLOCKS_PER_SEC );
 }
 
 /* public interface for controlling GC torture settings */
@@ -2122,8 +2131,10 @@ void attribute_hidden InitMemory()
     R_HandlerStack = R_RestartStack = R_NilValue;
 
     /*  Unbound values which are to be preserved through GCs */
-    R_PreciousList = R_NilValue;
-    
+    if (!(R_PreciousList = (SEXP *) calloc(PHSIZE, sizeof(SEXP))))
+        R_Suicide("couldn't allocate memory for PreciousList");
+    for (int i = 0; i < PHSIZE; i++) R_PreciousList[i] = R_NilValue;
+
     /*  The current source line */
     R_Srcref = R_NilValue;
 
@@ -3222,25 +3233,45 @@ void R_chk_free(void *ptr)
    objects are registered with R_PreserveObject and deregistered with
    R_ReleaseObject. */
 
-void R_PreserveObject(SEXP object)
-{
-    R_PreciousList = CONS(object, R_PreciousList);
+inline uint32_t ComputeLongHash(uint64_t key) {
+  uint64_t hash = key; 
+  hash = ~hash + (hash << 18);  // hash = (hash << 18) - hash - 1;
+  hash = hash ^ (hash >> 31); 
+  hash = hash * 21;  // hash = (hash + (hash << 2)) + (hash << 4);
+  hash = hash ^ (hash >> 11); 
+  hash = hash + (hash << 6);
+  hash = hash ^ (hash >> 22); 
+  return (uint32_t)(hash);
 }
 
-static SEXP RecursiveRelease(SEXP object, SEXP list)
+void R_PreserveObject(SEXP object)
+{
+    start = clock();
+    int i = ComputeLongHash((unsigned long)object) >> (32-PRECIOUS_BITS);
+    R_assert(i < PHSIZE);
+    R_PreciousList[i] = CONS(object, R_PreciousList[i]);
+    preserve_time += clock() - start;
+}
+
+static SEXP RecursiveRelease(SEXP object, SEXP list, int i)
 {
     if (!isNull(list)) {
-	if (object == CAR(list))
+	if (object == CAR(list)) {
+            printf("%d\n", i);
 	    return CDR(list);
-	else
-	    CDR(list) = RecursiveRelease(object, CDR(list));
+        } else {
+	    CDR(list) = RecursiveRelease(object, CDR(list), i+1);
+        }
     }
     return list;
 }
 
 void R_ReleaseObject(SEXP object)
 {
-    R_PreciousList =  RecursiveRelease(object, R_PreciousList);
+    start = clock();
+    int i = ComputeLongHash((unsigned long)object) >> (32-PRECIOUS_BITS);
+    R_PreciousList[i] =  RecursiveRelease(object, R_PreciousList[i], 0);
+    preserve_time += clock() - start;
 }
 
 

@@ -1152,8 +1152,10 @@ SEXP install(const char *name)
     hashcode = R_Newhashpjw(name);
     i = hashcode % HSIZE;
     /* Check to see if the symbol is already present;  if it is, return it. */
-    for (sym = R_SymbolTable[i]; sym != R_NilValue; sym = CDR(sym))
+    int jj = 0;
+    for (sym = R_SymbolTable[i]; sym != R_NilValue; sym = CDR(sym)) {
 	if (strcmp(name, CHAR(PRINTNAME(CAR(sym)))) == 0) return (CAR(sym));
+    }
     /* Create a new symbol node and link it into the table. */
     sym = mkSYMSXP(mkChar(name), R_UnboundValue);
     SET_HASHVALUE(PRINTNAME(sym), hashcode);
