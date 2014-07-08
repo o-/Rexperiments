@@ -1849,7 +1849,7 @@ static void RunGenCollect(R_size_t size_needed)
 	SortNodes();
 #endif
 
-//    if (gc_reporting) {
+    if (gc_reporting) {
 	REprintf("Garbage collection %d = %d", gc_count, gen_gc_counts[0]);
 	for (i = 0; i < NUM_OLD_GENERATIONS; i++)
 	    REprintf("+%d", gen_gc_counts[i + 1]);
@@ -1863,7 +1863,7 @@ static void RunGenCollect(R_size_t size_needed)
             R_GenHeap[5].OldCount[0], R_GenHeap[5].OldCount[1],
             R_GenHeap[7].OldCount[0], R_GenHeap[7].OldCount[1]);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
- //   }
+    }
 }
 
 /* public interface for controlling GC torture settings */
