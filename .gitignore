@@ -1,5 +1,8 @@
 .RData
 .Rhistory
+*.fail
+*.prev
+*.pdf
 Makeconf
 Makefile
 Makefrag.cc
