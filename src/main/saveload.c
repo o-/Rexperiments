@@ -754,18 +754,6 @@ static SEXP DataLoad(FILE *fp, int startup, InputRoutines *m,
  *  Copyright Assigned to the R Project.
  */
 
-/*  An assert function which doesn't crash the program.
- *  Something like this might be useful in an R header file
- */
-
-#ifdef NDEBUG
-#define R_assert(e) ((void) 0)
-#else
-/* The line below requires an ANSI C preprocessor (stringify operator) */
-#define R_assert(e) ((e) ? (void) 0 : error("assertion `%s' failed: file `%s', line %d\n", #e, __FILE__, __LINE__))
-#endif /* NDEBUG */
-
-
 static void NewWriteItem (SEXP s, SEXP sym_list, SEXP env_list, FILE *fp, OutputRoutines *, SaveLoadData *);
 static SEXP NewReadItem (SEXP sym_table, SEXP env_table, FILE *fp, InputRoutines *, SaveLoadData *);
 

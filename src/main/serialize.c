@@ -177,13 +177,6 @@ static const int R_DefaultSerializeVersion = 2;
  * Something like this might be useful in an R header file
  */
 
-#ifdef NDEBUG
-#define R_assert(e) ((void) 0)
-#else
-/* The line below requires an ANSI C preprocessor (stringify operator) */
-#define R_assert(e) ((e) ? (void) 0 : error("assertion '%s' failed: file '%s', line %d\n", #e, __FILE__, __LINE__))
-#endif /* NDEBUG */
-
 /* Rsnprintf: like snprintf, but guaranteed to null-terminate. */
 static int Rsnprintf(char *buf, int size, const char *format, ...)
 {

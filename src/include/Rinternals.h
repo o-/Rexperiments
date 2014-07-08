@@ -1295,6 +1295,13 @@ SEXP R_FixupRHS(SEXP x, SEXP y);
     } while (FALSE)
 #endif
 
+#ifdef NDEBUG
+#define R_assert(e) ((void) 0)
+#else
+/* The line below requires an ANSI C preprocessor (stringify operator) */
+#define R_assert(e) ((e) ? (void) 0 : error("assertion '%s' failed: file '%s', line %d\n", #e, __FILE__, __LINE__))
+#endif /* NDEBUG */
+
 #ifdef __cplusplus
 }
 #endif
