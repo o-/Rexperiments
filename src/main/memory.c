@@ -37,6 +37,8 @@
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
+#include<pthread.h>
+
 /* Declarations for Valgrind.
 
    These are controlled by the
@@ -1534,6 +1536,44 @@ static void FindGeneration(SEXP ptr) {
     } \
 } while (0)
 
+
+struct thread_info {    /* Used as argument to thread_start() */
+  pthread_t thread_id;
+  int       thread_num;
+  int       todo;
+  SEXP      forwarded_nodes;
+  int       nc;
+};
+
+
+void * ProcessStringHashBucket(void* arg) {
+    struct thread_info *tinfo = arg;
+    int nc = 0;
+    int start = tinfo->todo*tinfo->thread_num;
+    //printf("thread %d started\n", tinfo->thread_num);
+    SEXP forwarded_nodes = tinfo->forwarded_nodes;
+    for (int i = start; i < start + tinfo->todo && i<LENGTH(R_StringHash); i++) {
+	    SEXP s = VECTOR_ELT(R_StringHash, i);
+	    SEXP t = R_NilValue;
+	    while (s != R_NilValue) {
+		if (! NODE_IS_MARKED(CXHEAD(s))) { /* remove unused CHARSXP and cons cell */
+		    if (t == R_NilValue) /* head of list */
+			VECTOR_ELT(R_StringHash, i) = CXTAIL(s);
+		    else
+			CXTAIL(t) = CXTAIL(s);
+		    s = CXTAIL(s);
+		    continue;
+		}
+		FORWARD_NODE(s);
+		FORWARD_NODE(CXHEAD(s));
+		t = s;
+		s = CXTAIL(s);
+	    }
+	    if(VECTOR_ELT(R_StringHash, i) != R_NilValue) nc++;
+    }
+    tinfo->nc = nc;
+}
+
 static void RunGenCollect(R_size_t size_needed)
 {
     int i, gen, gens_collected;
@@ -1713,31 +1753,31 @@ static void RunGenCollect(R_size_t size_needed)
     /* process CHARSXP cache */
     if (R_StringHash != NULL) /* in case of GC during initialization */
     {
+        struct thread_info *tinfo;
 	SEXP t;
 	int nc = 0;
-	for (i = 0; i < LENGTH(R_StringHash); i++) {
-	    s = VECTOR_ELT(R_StringHash, i);
-	    t = R_NilValue;
-	    while (s != R_NilValue) {
-		if (! NODE_IS_MARKED(CXHEAD(s))) { /* remove unused CHARSXP and cons cell */
-		    if (t == R_NilValue) /* head of list */
-			VECTOR_ELT(R_StringHash, i) = CXTAIL(s);
-		    else
-			CXTAIL(t) = CXTAIL(s);
-		    s = CXTAIL(s);
-		    continue;
-		}
-		FORWARD_NODE(s);
-		FORWARD_NODE(CXHEAD(s));
-		t = s;
-		s = CXTAIL(s);
-	    }
-	    if(VECTOR_ELT(R_StringHash, i) != R_NilValue) nc++;
+        int len     = LENGTH(R_StringHash);
+        int threads = 2;
+        int todo    = len / threads;
+        tinfo = calloc(threads, sizeof(struct thread_info));
+	for (i = 0; i < threads; i++) {
+          tinfo[i].thread_num = i;
+          tinfo[i].todo  = todo;
+          pthread_create(&tinfo[i].thread_id, NULL,
+                         &ProcessStringHashBucket, &tinfo[i]);
 	}
+        for (int tnum = 0; tnum < threads; tnum++) {
+          void *res;
+          pthread_join(tinfo[tnum].thread_id, &res);
+          nc += tinfo[tnum].nc;
+          FORWARD_NODE(tinfo[tnum].forwarded_nodes);
+          //free(res);
+        }
 	SET_TRUELENGTH(R_StringHash, nc); /* SET_HASHPRI, really */
+        FORWARD_NODE(R_StringHash);
+        PROCESS_NODES();
+        free(tinfo);
     }
-    FORWARD_NODE(R_StringHash);
-    PROCESS_NODES();
 
 #ifdef PROTECTCHECK
     for(i=0; i< NUM_SMALL_NODE_CLASSES;i++){
