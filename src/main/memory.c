@@ -1507,8 +1507,8 @@ void attribute_hidden InitMemory()
     gc_reporting = R_Verbose;
     R_StandardPPStackSize = R_PPStackSize;
     R_RealPPStackSize = R_PPStackSize + PP_REDZONE_SIZE;
-    if (!(R_PPStack = (SEXP *) malloc(R_RealPPStackSize * sizeof(SEXP))))
-	R_Suicide("couldn't allocate memory for pointer stack");
+//    if (!(R_PPStack = (SEXP *) malloc(R_RealPPStackSize * sizeof(SEXP))))
+//	R_Suicide("couldn't allocate memory for pointer stack");
     R_PPStackTop = 0;
 #if VALGRIND_LEVEL > 1
     VALGRIND_MAKE_NOACCESS(R_PPStack+R_PPStackSize, PP_REDZONE_SIZE);
@@ -2436,6 +2436,7 @@ void R_signal_unprotect_error(void)
 #ifndef INLINE_PROTECT
 SEXP protect(SEXP s)
 {
+  return;
     if (R_PPStackTop >= R_PPStackSize)
 	R_signal_protect_error();
     R_PPStack[R_PPStackTop++] = CHK(s);
@@ -2447,6 +2448,7 @@ SEXP protect(SEXP s)
 
 void unprotect(int l)
 {
+  return;
     if (R_PPStackTop >=  l)
 	R_PPStackTop -= l;
     else R_signal_unprotect_error();
@@ -2457,6 +2459,7 @@ void unprotect(int l)
 
 void unprotect_ptr(SEXP s)
 {
+  return;
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -2478,6 +2481,7 @@ void unprotect_ptr(SEXP s)
 
 int Rf_isProtected(SEXP s)
 {
+  return 1;
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -2494,6 +2498,7 @@ int Rf_isProtected(SEXP s)
 #ifndef INLINE_PROTECT
 void R_ProtectWithIndex(SEXP s, PROTECT_INDEX *pi)
 {
+  return;
     protect(s);
     *pi = R_PPStackTop - 1;
 }
@@ -2510,6 +2515,7 @@ void R_signal_reprotect_error(PROTECT_INDEX i)
 #ifndef INLINE_PROTECT
 void R_Reprotect(SEXP s, PROTECT_INDEX i)
 {
+  return;
     if (i >= R_PPStackTop || i < 0)
 	R_signal_reprotect_error(i);
     R_PPStack[i] = s;
@@ -2522,6 +2528,7 @@ void R_Reprotect(SEXP s, PROTECT_INDEX i)
    to old. */
 SEXP R_CollectFromIndex(PROTECT_INDEX i)
 {
+  return;
     SEXP res;
     int top = R_PPStackTop, j = 0;
     if (i > top) i = top;
@@ -2563,10 +2570,11 @@ void *R_chk_realloc(void *ptr, size_t size)
     void *p;
     /* Protect against broken realloc */
     if(ptr) {
-      void *n = GC_MALLOC(size);
-      memcpy(n, p, size);
-      p = n;
-//      p = realloc(ptr, size);
+//      void *n = GC_MALLOC(size);
+//      memcpy(n, p, size);
+//      p = n;
+	error("'Realloc' no supported"); 
+      p = realloc(ptr, size);
     } else {
       p = malloc(size);
     }

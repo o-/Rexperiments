@@ -59,6 +59,7 @@ strsplit grep [g]sub [g]regexpr
 /* How many encoding warnings to give */
 #define NWARN 5
 
+#include <gc.h>
 #include <Defn.h>
 #include <Internal.h>
 #include <R_ext/RS.h>  /* for Calloc/Free */
@@ -139,7 +140,7 @@ SEXP attribute_hidden do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
     R_xlen_t i, itok, len, tlen;
     size_t j, ntok;
     int fixed_opt, perl_opt, useBytes;
-    char *pt = NULL; wchar_t *wpt = NULL;
+    char *pt = NULL; char* old_pt; wchar_t *wpt = NULL;
     const char *buf, *split = "", *bufp;
     const unsigned char *tables = NULL;
     Rboolean use_UTF8 = FALSE, haveBytes = FALSE;
@@ -342,7 +343,10 @@ SEXP attribute_hidden do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
 			       t = allocVector(STRSXP, ntok + (*bufp ? 1 : 0)));
 		/* and fill with the splits */
 		laststart = bufp = buf;
-		pt = Realloc(pt, strlen(buf)+1, char);
+                old_pt = pt;
+		pt = GC_MALLOC(strlen(buf)+1 * sizeof(char));
+                if(old_pt != NULL)
+                  strcpy(pt, old_pt);
 		for (size_t j = 0; j < ntok; j++) {
 		    /* This is UTF-8 safe since it compares whole
 		       strings, but <MBCS-FIXME> it would be more
@@ -452,7 +456,10 @@ SEXP attribute_hidden do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
 			       t = allocVector(STRSXP, ntok + (*bufp ? 1 : 0)));
 		/* and fill with the splits */
 		bufp = buf;
-		pt = Realloc(pt, strlen(buf)+1, char);
+                old_pt = pt;
+		pt = GC_MALLOC(strlen(buf)+1 * sizeof(char));
+                if(old_pt != NULL)
+                  strcpy(pt, old_pt);
 		for (j = 0; j < ntok; j++) {
 		    pcre_exec(re_pcre, re_pe, bufp, (int) strlen(bufp), 0, 0,
 			      ovector, 30);
@@ -607,7 +614,10 @@ SEXP attribute_hidden do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
 			       t = allocVector(STRSXP, ntok + (*bufp ? 1 : 0)));
 		/* and fill with the splits */
 		bufp = buf;
-		pt = Realloc(pt, strlen(buf)+1, char);
+                old_pt = pt;
+		pt = GC_MALLOC(strlen(buf)+1 * sizeof(char));
+                if(old_pt != NULL)
+                  strcpy(pt, old_pt);
 		for (j = 0; j < ntok; j++) {
 		    tre_regexec(&reg, bufp, 1, regmatch, 0);
 		    if (regmatch[0].rm_eo > 0) {
@@ -636,7 +646,7 @@ SEXP attribute_hidden do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
     if (getAttrib(x, R_NamesSymbol) != R_NilValue)
 	namesgets(ans, getAttrib(x, R_NamesSymbol));
     UNPROTECT(1);
-    Free(pt); Free(wpt);
+    Free(wpt);
     if (tables) pcre_free((void *)tables);
     return ans;
 }
