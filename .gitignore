@@ -3,6 +3,7 @@
 *.fail
 *.prev
 *.pdf
+*.Rout
 Makeconf
 Makefile
 Makefrag.cc
