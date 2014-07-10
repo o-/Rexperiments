@@ -3212,8 +3212,11 @@ void *R_AllocStringBuffer(size_t blen, R_StringBuffer *buf)
 	buf->data = (char *) malloc(blen);
 	if(buf->data)
 	    buf->data[0] = '\0';
-    } else
-	buf->data = (char *) realloc(buf->data, blen);
+    } else {
+        char* old = buf->data;
+	buf->data = (char *) GC_MALLOC(blen);
+        strcpy(buf->data, old);
+    }
     buf->bufsize = blen;
     if(!buf->data) {
 	buf->bufsize = 0;
