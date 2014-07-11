@@ -276,8 +276,10 @@ static SEXP R_HashGet(int hashcode, SEXP symbol, SEXP table)
     /* Grab the chain from the hashtable */
     chain = VECTOR_ELT(table, hashcode);
     /* Retrieve the value from the chain */
-    for (; chain != R_NilValue ; chain = CDR(chain))
+    for (; chain != R_NilValue ; chain = CDR(chain)) {
 	if (TAG(chain) == symbol) return BINDING_VALUE(chain);
+        if (CDR(chain) == 0xdeadbeef) __asm("int3");
+    }
     /* If not found */
     return R_UnboundValue;
 }
