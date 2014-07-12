@@ -497,7 +497,7 @@ typedef union PAGE_HEADER {
   double align;
 } PAGE_HEADER;
 
-#define BASE_PAGE_SIZE 2000
+#define BASE_PAGE_SIZE 32768
 #define R_PAGE_SIZE \
   (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
    * sizeof(SEXPREC) \
@@ -596,21 +596,18 @@ static R_size_t R_NodesInUse = 0;
    dc__extra__ as a second argument for each call. */
 /* When the CHARSXP hash chains are maintained through the ATTRIB
    field it is important that we NOT trace those fields otherwise too
-   many CHARSXPs will be kept alive artificially. As a safety we don't
+   many CHARSXPs will be kept alive artificially. As a safety (???!
+   defensive programming ftw???) we don't
    ignore all non-NULL ATTRIB values for CHARSXPs but only those that
    are themselves CHARSXPs, which is what they will be if they are
    part of a hash chain.  Theoretically, for CHARSXPs the ATTRIB field
    should always be either R_NilValue or a CHARSXP. */
-#ifdef PROTECTCHECK
-# define HAS_GENUINE_ATTRIB(x) \
-    (TYPEOF(x) != FREESXP && ATTRIB(x) != R_NilValue && \
-     (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP))
-#else
-# define HAS_GENUINE_ATTRIB(x) \
-    (ATTRIB(x) != R_NilValue && \
-     (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP) && \
-     (TYPEOF(x) != RAWSXP || ATTRIB(x) != NULL))
-#endif
+
+# define HAS__GENUINE_ATTRIB(x) \
+  (ATTRIB(x) != R_NilValue && \
+   TYPEOF(x) != CHARSXP && \
+   TYPEOF(x) != RAWSXP)
+
 
 #ifdef PROTECTCHECK
 #define FREE_FORWARD_CASE case FREESXP: if (gc_inhibit_release) break;
@@ -618,7 +615,7 @@ static R_size_t R_NodesInUse = 0;
 #define FREE_FORWARD_CASE
 #endif
 #define DO_CHILDREN(__n__,dc__action__,dc__extra__) do { \
-  if (HAS_GENUINE_ATTRIB(__n__)) \
+  if (HAS__GENUINE_ATTRIB(__n__)) \
     dc__action__(ATTRIB(__n__), dc__extra__); \
   switch (TYPEOF(__n__)) { \
   case NILSXP: \
@@ -655,7 +652,7 @@ static R_size_t R_NodesInUse = 0;
   case SYMSXP: \
   case BCODESXP: \
     dc__action__(TAG(__n__), dc__extra__); \
-    dc__action__(CAR(__n__), dc__extra__); \
+    if (CAR(__n__) != NULL) dc__action__(CAR(__n__), dc__extra__); \
     dc__action__(CDR(__n__), dc__extra__); \
     break; \
   case EXTPTRSXP: \
@@ -674,19 +671,26 @@ static R_size_t R_NodesInUse = 0;
    to be in a local variable of the caller named named
    forwarded_nodes. */
 
-#define FORWARD_STACK_SIZE 1000000
+#define FORWARD_STACK_SIZE 300000
+typedef struct forwarded_nodes_struct {
+  SEXP stack[FORWARD_STACK_SIZE];
+  int  top;
+} forwarded_nodes_struct;
 
-#define FORWARD_NODE(s) do { \
-  SEXP fn__n__ = (s); \
-  if (NODE_IS_MARKED(fn__n__)) __asm("int3"); \
-  forwarded_nodes[(*forwarded_nodes_top)++] = fn__n__; \
-  if ((*forwarded_nodes_top) >= FORWARD_STACK_SIZE) \
-    R_Suicide("ran out of scanning stack"); \
-} while (0)
 
-#define FC_FORWARD_NODE(__n__,__dummy__) \
-  if (!NODE_IS_MARKED(__n__)) FORWARD_NODE(__n__)
-#define FORWARD_CHILDREN(__n__) DO_CHILDREN(__n__,FC_FORWARD_NODE, 0)
+
+
+void FORWARD_NODE(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
+  if (NODE_IS_MARKED(s)) __asm("int3");
+  forwarded_nodes->stack[forwarded_nodes->top++] = s;
+  if (forwarded_nodes->top >= FORWARD_STACK_SIZE)
+    R_Suicide("ran out of scanning stack");
+}
+
+void FORWARD_NODE_IF_UNMARKED(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
+  if (!NODE_IS_MARKED(s))
+    FORWARD_NODE(s, forwarded_nodes);
+}
 
 /* This macro should help localize where a FREESXP node is encountered
    in the GC */
@@ -826,11 +830,13 @@ static void ReleasePage(PAGE_HEADER *page, int node_class)
     free(page);
 }
 
+static int release_count = 0;
+
 static void TryToReleasePages(void)
 {
+  return;
     SEXP s;
     int i;
-    static int release_count = 0;
 
     if (release_count == 0) {
 	release_count = R_PageReleaseFreq;
@@ -916,10 +922,11 @@ static void ReleaseLargeFreeVectors()
 {
     for (int node_class = CUSTOM_NODE_CLASS; node_class <= LARGE_NODE_CLASS; node_class++) {
 	SEXP s = NEXT_NODE(R_GenHeap[node_class].New);
-        if (NODE_IS_MARKED(s)) continue;
 	while (s != R_GenHeap[node_class].New) {
 	    SEXP next = NEXT_NODE(s);
-	    if (CHAR(s) != NULL) {
+            if (NODE_IS_MARKED(s) || CHAR(s) == NULL) {
+                UNMARK_NODE(s);
+            } else {
 		R_size_t size;
 #ifdef PROTECTCHECK
 		if (TYPEOF(s) == FREESXP)
@@ -1053,47 +1060,64 @@ static void FindParents(SEXP ptr) {
    probably sufficient.
 */
 
+
 #define SORT_NODES
 #ifdef SORT_NODES
 static void SortNodes(void)
 {
     SEXP s;
 
+    static int release_count = 0;
+
+    int do_release = 0;
+    if (release_count == 0) {
+      do_release = 1;
+      release_count = R_PageReleaseFreq;
+    } else {
+      release_count--;
+    }
     for (int i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
-	PAGE_HEADER *page;
+	PAGE_HEADER *page, *last = NULL, *next;
 	int node_size = NODE_SIZE(i);
 	int page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
 
 	SET_NEXT_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
 	SET_PREV_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
-        
-	for (page = R_GenHeap[i].pages; page != NULL; page = page->next) {
-	    int j;
+	
+	for (page = R_GenHeap[i].pages; page != NULL;) {
 	    char *data = PAGE_DATA(page);
+            int in_use = 0;
 
-	    for (j = 0; j < page_count; j++, data += node_size) {
+            next = page->next;
+
+	    for (int j = 0; j < page_count; j++, data += node_size) {
 		s = (SEXP) data;
 		if (! NODE_IS_MARKED(s)) {
 		    SNAP_NODE(s, R_GenHeap[i].New);
-                    // CDR(s) = 0xdeadbeef;
+//                    TAG(s) = 0xdeadbeef;
+//                    CAR(s) = 0xdeadbeee;
+//                    CDR(s) = 0xdeadbe00 + NODE_CLASS(s);
+                    if (NODE_CLASS(s) == 0) R_NodesInUse--;
                     SET_NODE_CLASS(s, FREESXP);
                 } else {
+                    in_use = 1;
                     UNMARK_NODE(s);
                 }
 	    }
+	    if (!in_use && do_release) {
+		    ReleasePage(page, i);
+		    if (last == NULL) {
+			R_GenHeap[i].pages = next;
+                    } else {
+			last->next = next;
+                    }
+	    } else {
+              last = page;
+            }
+            page = next;
 	}
 	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
     }
-
-    for (int node_class = CUSTOM_NODE_CLASS; node_class <= LARGE_NODE_CLASS; node_class++) {
-	SEXP s = NEXT_NODE(R_GenHeap[node_class].New);
-	while (s != R_GenHeap[node_class].New) {
-	    SEXP next = NEXT_NODE(s);
-            UNMARK_NODE(s);
-	    s = next;
-        }
-    }
-
 }
 #endif
 
@@ -1393,14 +1417,96 @@ SEXP attribute_hidden do_regFinaliz(SEXP call, SEXP op, SEXP args, SEXP rho)
 }
 /* The Generational Collector. */
 
-static void process_nodes(SEXP * forwarded_nodes, int * forwarded_nodes_top) {
-    while (*forwarded_nodes_top > 0) { 
-      SEXP s = forwarded_nodes[--(*forwarded_nodes_top)];
-      if (!NODE_IS_MARKED(s)) {
-        MARK_NODE(s);
-        FORWARD_CHILDREN(s);
+void keep_my_sanity(SEXP s) {
+  // Need to fix this!
+  if (ATTRIB(s) == NULL && TYPEOF(s) != RAWSXP)
+    __asm("int3;");
+
+  switch(TYPEOF(s)) {
+    case CHARSXP:
+      if (TYPEOF(ATTRIB(s)) != CHARSXP && ATTRIB(s) != R_NilValue) {
+        __asm("int3");
       }
-    }    
+      break;
+    case NEWSXP:
+    case FREESXP:
+      __asm("int3");
+      break;
+    case LISTSXP:
+      if(CAR(s) == NULL || CDR(s) == NULL)
+        __asm("int3");
+      if(TYPEOF(CDR(s)) != LISTSXP && CDR(s) != R_NilValue)
+        __asm("int3");
+      if(TYPEOF(CAR(s)) == -1)
+        __asm("int3");
+      break;
+    case RAWSXP:
+      // Why NULL??? Where does it come from?
+      if (ATTRIB(s) != NULL && ATTRIB(s) != R_NilValue &&
+          TYPEOF(ATTRIB(s)) != RAWSXP)
+        __asm("int3");
+      break;
+  }
+}
+
+static void process_nodes(forwarded_nodes_struct * forwarded_nodes) {
+    while (forwarded_nodes->top > 0) { 
+      SEXP s = forwarded_nodes->stack[--forwarded_nodes->top];
+      if (!NODE_IS_MARKED(s)) {
+        keep_my_sanity(s);
+        MARK_NODE(s);
+
+        if (ATTRIB(s) != R_NilValue && TYPEOF(s) != CHARSXP &&
+            // need to fix this
+            ATTRIB(s) != NULL) {
+          FORWARD_NODE_IF_UNMARKED(ATTRIB(s), forwarded_nodes);
+        }
+        switch (TYPEOF(s)) {
+        case NILSXP:
+        case BUILTINSXP:
+        case SPECIALSXP:
+        case CHARSXP:
+        case LGLSXP:
+        case INTSXP:
+        case REALSXP:
+        case CPLXSXP:
+        case WEAKREFSXP:
+        case RAWSXP:
+        case S4SXP:
+          break;
+        case STRSXP:
+        case EXPRSXP:
+        case VECSXP: {
+            for (int i = 0; i < LENGTH(s); ++i)
+              FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i), forwarded_nodes);
+          }
+          break;
+        case ENVSXP:
+          FORWARD_NODE_IF_UNMARKED(FRAME(s), forwarded_nodes);
+          if (ENCLOS(s) != NULL) FORWARD_NODE_IF_UNMARKED(ENCLOS(s), forwarded_nodes);
+          FORWARD_NODE_IF_UNMARKED(HASHTAB(s), forwarded_nodes);
+          break;
+        case CLOSXP:
+        case PROMSXP:
+        case LISTSXP:
+        case LANGSXP:
+        case DOTSXP:
+        case SYMSXP:
+        case BCODESXP:
+          FORWARD_NODE_IF_UNMARKED(TAG(s), forwarded_nodes);
+          if (CAR(s) != NULL) FORWARD_NODE_IF_UNMARKED(CAR(s), forwarded_nodes);
+          FORWARD_NODE_IF_UNMARKED(CDR(s), forwarded_nodes);
+          break;
+        case EXTPTRSXP:
+          FORWARD_NODE_IF_UNMARKED(EXTPTR_PROT(s), forwarded_nodes);
+          FORWARD_NODE_IF_UNMARKED(EXTPTR_TAG(s), forwarded_nodes);
+          break;
+        FREE_FORWARD_CASE
+        default:
+          register_bad_sexp_type(s, __LINE__);
+        }
+      }
+    }
 }
 
 static void RunGenCollect(R_size_t size_needed)
@@ -1408,9 +1514,9 @@ static void RunGenCollect(R_size_t size_needed)
     int i, gen, gens_collected;
     RCNTXT *ctxt;
     SEXP  s;
-    SEXP  forwarded_nodes[FORWARD_STACK_SIZE];
-    int   _forwarded_nodes_top = 0;
-    int * forwarded_nodes_top = &_forwarded_nodes_top;
+    forwarded_nodes_struct forwarded_nodes_;
+    forwarded_nodes_.top = 0;
+    forwarded_nodes_struct * forwarded_nodes = &forwarded_nodes_;
 
     bad_sexp_type_seen = 0;
 
@@ -1441,72 +1547,72 @@ static void RunGenCollect(R_size_t size_needed)
 
    // printf("collect roots\n");
     /* forward all roots */
-    FORWARD_NODE(R_NilValue);	           /* Builtin constants */
-    FORWARD_NODE(NA_STRING);
-    FORWARD_NODE(R_BlankString);
-    FORWARD_NODE(R_UnboundValue);
-    FORWARD_NODE(R_RestartToken);
-    FORWARD_NODE(R_MissingArg);
+    FORWARD_NODE(R_NilValue, forwarded_nodes);	           /* Builtin constants */
+    FORWARD_NODE(NA_STRING, forwarded_nodes);
+    FORWARD_NODE(R_BlankString, forwarded_nodes);
+    FORWARD_NODE(R_UnboundValue, forwarded_nodes);
+    FORWARD_NODE(R_RestartToken, forwarded_nodes);
+    FORWARD_NODE(R_MissingArg, forwarded_nodes);
 
-    FORWARD_NODE(R_GlobalEnv);	           /* Global environment */
-    FORWARD_NODE(R_BaseEnv);
-    FORWARD_NODE(R_EmptyEnv);
-    FORWARD_NODE(R_Warnings);	           /* Warnings, if any */
+    FORWARD_NODE(R_GlobalEnv, forwarded_nodes);	           /* Global environment */
+    FORWARD_NODE(R_BaseEnv, forwarded_nodes);
+    FORWARD_NODE(R_EmptyEnv, forwarded_nodes);
+    FORWARD_NODE(R_Warnings, forwarded_nodes);	           /* Warnings, if any */
 
-    FORWARD_NODE(R_HandlerStack);          /* Condition handler stack */
-    FORWARD_NODE(R_RestartStack);          /* Available restarts stack */
+    FORWARD_NODE(R_HandlerStack, forwarded_nodes);          /* Condition handler stack */
+    FORWARD_NODE(R_RestartStack, forwarded_nodes);          /* Available restarts stack */
 
-    FORWARD_NODE(R_Srcref);                /* Current source reference */
+    if (R_Srcref != NULL) FORWARD_NODE(R_Srcref, forwarded_nodes);                /* Current source reference */
 
-    FORWARD_NODE(R_TrueValue);
-    FORWARD_NODE(R_FalseValue);
-    FORWARD_NODE(R_LogicalNAValue);
+    FORWARD_NODE(R_TrueValue, forwarded_nodes);
+    FORWARD_NODE(R_FalseValue, forwarded_nodes);
+    FORWARD_NODE(R_LogicalNAValue, forwarded_nodes);
 
     if (R_SymbolTable != NULL)             /* in case of GC during startup */
 	for (i = 0; i < HSIZE; i++)        /* Symbol table */
-	    FORWARD_NODE(R_SymbolTable[i]);
+	    FORWARD_NODE(R_SymbolTable[i], forwarded_nodes);
 
     if (R_CurrentExpr != NULL)	           /* Current expression */
-	FORWARD_NODE(R_CurrentExpr);
+	FORWARD_NODE(R_CurrentExpr, forwarded_nodes);
 
     for (i = 0; i < R_MaxDevices; i++) {   /* Device display lists */
 	pGEDevDesc gdd = GEgetDevice(i);
 	if (gdd != NULL) {
 	    if (gdd->displayList != NULL) {
-                FORWARD_NODE(gdd->displayList);
+                FORWARD_NODE(gdd->displayList, forwarded_nodes);
             }
 	    if (gdd->savedSnapshot != NULL) {
-	        FORWARD_NODE(gdd->savedSnapshot);
+	        FORWARD_NODE(gdd->savedSnapshot, forwarded_nodes);
             }
 	    if (gdd->dev) {
-	    	FORWARD_NODE(gdd->dev->eventEnv);
+	    	FORWARD_NODE(gdd->dev->eventEnv, forwarded_nodes);
             }
 	}
     }
 
     for (ctxt = R_GlobalContext ; ctxt != NULL ; ctxt = ctxt->nextcontext) {
-	FORWARD_NODE(ctxt->conexit);       /* on.exit expressions */
-	FORWARD_NODE(ctxt->promargs);	   /* promises supplied to closure */
-	FORWARD_NODE(ctxt->callfun);       /* the closure called */
-	FORWARD_NODE(ctxt->sysparent);     /* calling environment */
-	FORWARD_NODE(ctxt->call);          /* the call */
-	FORWARD_NODE(ctxt->cloenv);        /* the closure environment */
-	FORWARD_NODE(ctxt->handlerstack);  /* the condition handler stack */
-	FORWARD_NODE(ctxt->restartstack);  /* the available restarts stack */
-	FORWARD_NODE(ctxt->srcref);	   /* the current source reference */
+	FORWARD_NODE(ctxt->conexit, forwarded_nodes);       /* on.exit expressions */
+	FORWARD_NODE(ctxt->promargs, forwarded_nodes);	   /* promises supplied to closure */
+	FORWARD_NODE(ctxt->callfun, forwarded_nodes);       /* the closure called */
+	FORWARD_NODE(ctxt->sysparent, forwarded_nodes);     /* calling environment */
+	FORWARD_NODE(ctxt->call, forwarded_nodes);          /* the call */
+	FORWARD_NODE(ctxt->cloenv, forwarded_nodes);        /* the closure environment */
+	FORWARD_NODE(ctxt->handlerstack, forwarded_nodes);  /* the condition handler stack */
+	FORWARD_NODE(ctxt->restartstack, forwarded_nodes);  /* the available restarts stack */
+	FORWARD_NODE(ctxt->srcref, forwarded_nodes);	   /* the current source reference */
     }
 
-    FORWARD_NODE(R_PreciousList);
+    FORWARD_NODE(R_PreciousList, forwarded_nodes);
 
     for (i = 0; i < R_PPStackTop; i++)	   /* Protected pointers */
-	FORWARD_NODE(R_PPStack[i]);
+	FORWARD_NODE(R_PPStack[i], forwarded_nodes);
 
-    if (R_VStack != NULL) FORWARD_NODE(R_VStack);		   /* R_alloc stack */
+    if (R_VStack != NULL) FORWARD_NODE(R_VStack, forwarded_nodes);		   /* R_alloc stack */
 
     for (SEXP *sp = R_BCNodeStackBase; sp < R_BCNodeStackTop; sp++)
-	FORWARD_NODE(*sp);
+	FORWARD_NODE(*sp, forwarded_nodes);
 
-    process_nodes(forwarded_nodes, forwarded_nodes_top);
+    process_nodes(forwarded_nodes);
 
     /* identify weakly reachable nodes */
     {
@@ -1517,20 +1623,20 @@ static void RunGenCollect(R_size_t size_needed)
 		if (NODE_IS_MARKED(WEAKREF_KEY(s))) {
 		    if (! NODE_IS_MARKED(WEAKREF_VALUE(s))) {
 			recheck_weak_refs = TRUE;
-			FORWARD_NODE(WEAKREF_VALUE(s));
+			FORWARD_NODE(WEAKREF_VALUE(s), forwarded_nodes);
 		    }
 		    if (! NODE_IS_MARKED(WEAKREF_FINALIZER(s))) {
 			recheck_weak_refs = TRUE;
-			FORWARD_NODE(WEAKREF_FINALIZER(s));
+			FORWARD_NODE(WEAKREF_FINALIZER(s), forwarded_nodes);
 		    }
 		    if (! NODE_IS_MARKED(s)) {
 			recheck_weak_refs = TRUE;
-			FORWARD_NODE(s);
+			FORWARD_NODE(s, forwarded_nodes);
 		    }
 
 		}
 	    }
-            process_nodes(forwarded_nodes, forwarded_nodes_top);
+            process_nodes(forwarded_nodes);
 	} while (recheck_weak_refs);
     }
 
@@ -1540,13 +1646,14 @@ static void RunGenCollect(R_size_t size_needed)
     /* process the weak reference chain */
     for (s = R_weak_refs; s != R_NilValue; s = WEAKREF_NEXT(s)) {
       if (IS_READY_TO_FINALIZE(s)) {
-	if (!NODE_IS_MARKED(WEAKREF_KEY(s))) FORWARD_NODE(WEAKREF_KEY(s));
-	if (!NODE_IS_MARKED(s)) FORWARD_NODE(s);
-        if (!NODE_IS_MARKED(WEAKREF_VALUE(s))) FORWARD_NODE(WEAKREF_VALUE(s));
-        FORWARD_NODE(WEAKREF_FINALIZER(s));
+	if (!NODE_IS_MARKED(WEAKREF_KEY(s))) FORWARD_NODE(WEAKREF_KEY(s), forwarded_nodes);
+	if (!NODE_IS_MARKED(s)) FORWARD_NODE(s, forwarded_nodes);
+        if (!NODE_IS_MARKED(WEAKREF_VALUE(s))) FORWARD_NODE(WEAKREF_VALUE(s), forwarded_nodes);
+        if (!NODE_IS_MARKED(WEAKREF_FINALIZER(s)))
+          FORWARD_NODE(WEAKREF_FINALIZER(s), forwarded_nodes);
       }
     }
-    process_nodes(forwarded_nodes, forwarded_nodes_top);
+    process_nodes(forwarded_nodes);
 
 //    DEBUG_CHECK_NODE_COUNTS("after processing forwarded list");
 
@@ -1574,21 +1681,21 @@ static void RunGenCollect(R_size_t size_needed)
 	    if(VECTOR_ELT(R_StringHash, i) != R_NilValue) nc++;
 	}
 	SET_TRUELENGTH(R_StringHash, nc); /* SET_HASHPRI, really */
-        FORWARD_NODE(R_StringHash);
-        process_nodes(forwarded_nodes, forwarded_nodes_top);
+        FORWARD_NODE(R_StringHash, forwarded_nodes);
+        process_nodes(forwarded_nodes);
     }
 
     /* release large vector allocations */
-    ReleaseLargeFreeVectors();
 
     DEBUG_CHECK_NODE_COUNTS("after releasing large allocated nodes");
 
+    ReleaseLargeFreeVectors();
+    SortNodes();
+
     AdjustHeapSize(size_needed);
-    TryToReleasePages();
     DEBUG_CHECK_NODE_COUNTS("after heap adjustment");
 
    // printf("sweep\n");
-    SortNodes();
 
     if (gc_reporting) {
 	REprintf("Garbage collection %d = %d", gc_count, gen_gc_counts[0]);
@@ -3075,9 +3182,9 @@ const char *(R_CHAR)(SEXP x) {
 }
 
 SEXP (STRING_ELT)(SEXP x, R_xlen_t i) {
-    if(TYPEOF(x) != STRSXP)
-	error("%s() can only be applied to a '%s', not a '%s'",
-	      "STRING_ELT", "character vector", type2char(TYPEOF(x)));
+//    if(TYPEOF(x) != STRSXP)
+//	error("%s() can only be applied to a '%s', not a '%s'",
+//	      "STRING_ELT", "character vector", type2char(TYPEOF(x)));
     return CHK(STRING_ELT(x, i));
 }
 
