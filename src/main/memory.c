@@ -1105,7 +1105,7 @@ static void SortNodes(void)
                       TAG(s) = 0xdeadbeee;
                     }
                     s->sxpinfo.gp = 0;
-                    if (NODE_CLASS(s) == 0) R_NodesInUse--;
+                    //if (NODE_CLASS(s) == 0) R_NodesInUse--;
                     SET_NODE_CLASS(s, FREESXP);
                 } else {
                     in_use = 1;
@@ -1448,7 +1448,7 @@ void keep_my_sanity(SEXP s) {
         __asm("int3");
 //      if(CAR(s) == NULL)
 //        __asm("int3");
-      if(TYPEOF(CDR(s)) != SYMSXP &&
+      if(TYPEOF(CDR(s)) != SYMSXP && TYPEOF(CDR(s)) != VECSXP &&
          // ^^ wtf?
           TYPEOF(CDR(s)) != LISTSXP && TYPEOF(CDR(s)) != LANGSXP &&
           CDR(s) != R_NilValue)
@@ -1468,7 +1468,7 @@ static void process_nodes(forwarded_nodes_struct * forwarded_nodes) {
       SEXP s = forwarded_nodes->stack[--forwarded_nodes->top];
       if (!NODE_IS_MARKED(s)) {
         //printf ("%p\n", s);
-        keep_my_sanity(s);
+        //keep_my_sanity(s);
 
         switch (TYPEOF(s)) {
         case NILSXP:
