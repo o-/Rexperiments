@@ -707,17 +707,27 @@ void FORWARD_NODE_IF_UNMARKED(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
 
 /* Node Allocation. */
 
+#define FREE_NODES_STACK_SIZE 1000000
+typedef struct free_nodes_struct {
+  SEXP stack[FREE_NODES_STACK_SIZE];
+  int  top;
+} free_nodes_struct;
+
+static free_nodes_struct free_nodes[NUM_SMALL_NODE_CLASSES];
+
 #define CLASS_GET_FREE_NODE(c,s) do { \
-  SEXP __n__ = R_GenHeap[c].Free; \
-  if (__n__ == R_GenHeap[c].New) { \
+  if (free_nodes[c].top < 1) { \
     GetNewPage(c); \
-    __n__ = R_GenHeap[c].Free; \
   } \
+  SEXP __n__ = free_nodes[c].stack[--free_nodes[c].top]; \
   ATTRIB(__n__) = NULL; \
-  R_GenHeap[c].Free = NEXT_NODE(__n__); \
   R_NodesInUse++; \
   (s) = __n__; \
 } while (0)
+
+#define ADD_FREE_NODE(c,s) \
+  if (free_nodes[c].top >= FREE_NODES_STACK_SIZE) __asm("int3"); \
+  free_nodes[c].stack[free_nodes[c].top++] = s
 
 #define NO_FREE_NODES() (R_NodesInUse >= R_NSize)
 #define GET_FREE_NODE(s) CLASS_GET_FREE_NODE(0,s)
@@ -790,10 +800,9 @@ static void GetNewPage(int node_class)
     R_GenHeap[node_class].PageCount++;
 
     data = PAGE_DATA(page);
-    base = R_GenHeap[node_class].New;
     for (i = 0; i < page_count; i++, data += node_size) {
 	s = (SEXP) data;
-	SNAP_NODE(s, base);
+        ADD_FREE_NODE(node_class, s);
 #if  VALGRIND_LEVEL > 1
 	if (NodeClassSize[node_class]>0)
 	    VALGRIND_MAKE_NOACCESS(DATAPTR(s), NodeClassSize[node_class]*sizeof(VECREC));
@@ -808,8 +817,6 @@ static void GetNewPage(int node_class)
 	INIT_REFCNT(s);
 	SET_NODE_CLASS(s, node_class);
 	TYPEOF(s) = NEWSXP;
-	base = s;
-	R_GenHeap[node_class].Free = s;
     }
 }
 
@@ -823,10 +830,6 @@ static void ReleasePage(PAGE_HEADER *page, int node_class)
     page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
     data = PAGE_DATA(page);
 
-    for (i = 0; i < page_count; i++, data += node_size) {
-	s = (SEXP) data;
-	UNSNAP_NODE(s);
-    }
     R_GenHeap[node_class].PageCount--;
     free(page);
 }
@@ -836,52 +839,6 @@ static int release_count = 0;
 static void TryToReleasePages(void)
 {
   return;
-    SEXP s;
-    int i;
-
-    if (release_count == 0) {
-	release_count = R_PageReleaseFreq;
-	for (i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
-	    int pages_free = 0;
-	    PAGE_HEADER *page, *last, *next;
-	    int node_size = NODE_SIZE(i);
-	    int page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
-	    int maxrel, maxrel_pages, rel_pages, gen;
-
-	    maxrel_pages = maxrel > 0 ? maxrel / page_count : 0;
-
-	    /* all nodes in New space should be both free and unmarked */
-	    for (page = R_GenHeap[i].pages, rel_pages = 0, last = NULL;
-		 rel_pages < maxrel_pages && page != NULL;) {
-		int j, in_use;
-		char *data = PAGE_DATA(page);
-
-		next = page->next;
-		for (in_use = 0, j = 0; j < page_count;
-		     j++, data += node_size) {
-		    s = (SEXP) data;
-		    if (NODE_IS_MARKED(s)) {
-			in_use = 1;
-			break;
-		    }
-		}
-		if (! in_use) {
-		    ReleasePage(page, i);
-		    if (last == NULL)
-			R_GenHeap[i].pages = next;
-		    else
-			last->next = next;
-		    pages_free++;
-		    rel_pages++;
-		}
-		else last = page;
-		page = next;
-	    }
-	    DEBUG_RELEASE_PRINT(rel_pages, maxrel_pages, i);
-	    R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
-	}
-    }
-    else release_count--;
 }
 
 /* compute size in VEC units so result will fit in LENGTH field for FREESXPs */
@@ -939,6 +896,7 @@ static void ReleaseLargeFreeVectors()
 		size = getVecSizeInVEC(s);
 #endif
 		UNSNAP_NODE(s);
+                R_NodesInUse--;
 		if (node_class == LARGE_NODE_CLASS) {
 		    R_LargeVallocSize -= size;
 #ifdef LONG_VECTOR_SUPPORT
@@ -1078,13 +1036,11 @@ static void SortNodes(void)
       release_count--;
     }
     for (int i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
+        free_nodes[i].top = 0;
 	PAGE_HEADER *page, *last = NULL, *next;
 	int node_size = NODE_SIZE(i);
 	int page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
 
-	SET_NEXT_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
-	SET_PREV_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
-	
 	for (page = R_GenHeap[i].pages; page != NULL;) {
 	    char *data = PAGE_DATA(page);
             int in_use = 0;
@@ -1092,11 +1048,12 @@ static void SortNodes(void)
             next = page->next;
 
 	    SEXP next_s = (SEXP) data;
+            int old_freelist_top = free_nodes[i].top;
 	    for (int j = 0; j < page_count; j++, data += node_size) {
                 s = next_s;
                 next_s = (SEXP) (data + node_size);
 		if (! NODE_IS_MARKED(s)) {
-		    SNAP_NODE(s, R_GenHeap[i].New);
+		    ADD_FREE_NODE(i, s);
                     // ZAP all fields
                     ATTRIB(s) = 0xdeadbeef;
                     CAR(s) = 0xdeadbeed;
@@ -1105,26 +1062,28 @@ static void SortNodes(void)
                       TAG(s) = 0xdeadbeee;
                     }
                     s->sxpinfo.gp = 0;
-                    //if (NODE_CLASS(s) == 0) R_NodesInUse--;
-                    SET_NODE_CLASS(s, FREESXP);
+                    if (TYPEOF(s) != FREESXP) {
+                      R_NodesInUse--;
+                      TYPEOF(s) = FREESXP;
+                    }
                 } else {
                     in_use = 1;
                     UNMARK_NODE(s);
                 }
 	    }
 	    if (!in_use && do_release) {
-		    ReleasePage(page, i);
+                    free_nodes[i].top = old_freelist_top;
 		    if (last == NULL) {
 			R_GenHeap[i].pages = next;
                     } else {
 			last->next = next;
                     }
+		    ReleasePage(page, i);
 	    } else {
               last = page;
             }
             page = next;
 	}
-	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
     }
 }
 #endif
@@ -1919,6 +1878,10 @@ void attribute_hidden InitMemory()
 {
     int i;
     int gen;
+
+    for (int i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
+      free_nodes[i].top  = 0;
+    }
 
     init_gctorture();
     init_gc_grow_settings();
