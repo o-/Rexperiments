@@ -713,6 +713,7 @@ void FORWARD_NODE_IF_UNMARKED(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
     GetNewPage(c); \
     __n__ = R_GenHeap[c].Free; \
   } \
+  ATTRIB(__n__) = NULL; \
   R_GenHeap[c].Free = NEXT_NODE(__n__); \
   R_NodesInUse++; \
   (s) = __n__; \
@@ -1090,13 +1091,20 @@ static void SortNodes(void)
 
             next = page->next;
 
+	    SEXP next_s = (SEXP) data;
 	    for (int j = 0; j < page_count; j++, data += node_size) {
-		s = (SEXP) data;
+                s = next_s;
+                next_s = (SEXP) (data + node_size);
 		if (! NODE_IS_MARKED(s)) {
 		    SNAP_NODE(s, R_GenHeap[i].New);
-//                    TAG(s) = 0xdeadbeef;
-//                    CAR(s) = 0xdeadbeee;
-//                    CDR(s) = 0xdeadbe00 + NODE_CLASS(s);
+                    // ZAP all fields
+                    ATTRIB(s) = 0xdeadbeef;
+                    CAR(s) = 0xdeadbeed;
+                    CDR(s) = 0xdeadbe00 + NODE_CLASS(s);
+                    if (NODE_CLASS(s) == 0) {
+                      TAG(s) = 0xdeadbeee;
+                    }
+                    s->sxpinfo.gp = 0;
                     if (NODE_CLASS(s) == 0) R_NodesInUse--;
                     SET_NODE_CLASS(s, FREESXP);
                 } else {
@@ -1422,6 +1430,9 @@ void keep_my_sanity(SEXP s) {
   if (ATTRIB(s) == NULL && TYPEOF(s) != RAWSXP)
     __asm("int3;");
 
+  if (ATTRIB(s) == 0xdeadbeef)
+    __asm("int3");
+
   switch(TYPEOF(s)) {
     case CHARSXP:
       if (TYPEOF(ATTRIB(s)) != CHARSXP && ATTRIB(s) != R_NilValue) {
@@ -1433,11 +1444,14 @@ void keep_my_sanity(SEXP s) {
       __asm("int3");
       break;
     case LISTSXP:
-      if(CAR(s) == NULL || CDR(s) == NULL)
+      if(CDR(s) == NULL)
         __asm("int3");
-      if(TYPEOF(CDR(s)) != LISTSXP && CDR(s) != R_NilValue)
-        __asm("int3");
-      if(TYPEOF(CAR(s)) == -1)
+//      if(CAR(s) == NULL)
+//        __asm("int3");
+      if(TYPEOF(CDR(s)) != SYMSXP &&
+         // ^^ wtf?
+          TYPEOF(CDR(s)) != LISTSXP && TYPEOF(CDR(s)) != LANGSXP &&
+          CDR(s) != R_NilValue)
         __asm("int3");
       break;
     case RAWSXP:
@@ -1453,32 +1467,54 @@ static void process_nodes(forwarded_nodes_struct * forwarded_nodes) {
     while (forwarded_nodes->top > 0) { 
       SEXP s = forwarded_nodes->stack[--forwarded_nodes->top];
       if (!NODE_IS_MARKED(s)) {
+        //printf ("%p\n", s);
         keep_my_sanity(s);
-        MARK_NODE(s);
 
-        if (ATTRIB(s) != R_NilValue && TYPEOF(s) != CHARSXP &&
-            // need to fix this
-            ATTRIB(s) != NULL) {
-          FORWARD_NODE_IF_UNMARKED(ATTRIB(s), forwarded_nodes);
-        }
         switch (TYPEOF(s)) {
         case NILSXP:
         case BUILTINSXP:
         case SPECIALSXP:
-        case CHARSXP:
         case LGLSXP:
         case INTSXP:
         case REALSXP:
         case CPLXSXP:
         case WEAKREFSXP:
-        case RAWSXP:
         case S4SXP:
+          break;
+        case CHARSXP:
+        case RAWSXP:
+          // need to fix this
+          if (ATTRIB(s) == NULL) {
+            MARK_NODE(s);
+            continue;
+          }
           break;
         case STRSXP:
         case EXPRSXP:
         case VECSXP: {
-            for (int i = 0; i < LENGTH(s); ++i)
-              FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i), forwarded_nodes);
+            int l = LENGTH(s);
+            int r = l%8;
+            int i = r-8;
+            switch(r) {
+              for (; i < l; i += 8) {
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i), forwarded_nodes);
+                case 7:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+1), forwarded_nodes);
+                case 6:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+2), forwarded_nodes);
+                case 5:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+3), forwarded_nodes);
+                case 4:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+4), forwarded_nodes);
+                case 3:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+5), forwarded_nodes);
+                case 2:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+6), forwarded_nodes);
+                case 1:
+                  FORWARD_NODE_IF_UNMARKED(STRING_ELT(s, i+7), forwarded_nodes);
+                case 0: {}
+              }
+            }
           }
           break;
         case ENVSXP:
@@ -1504,6 +1540,10 @@ static void process_nodes(forwarded_nodes_struct * forwarded_nodes) {
         FREE_FORWARD_CASE
         default:
           register_bad_sexp_type(s, __LINE__);
+        }
+        MARK_NODE(s);
+        if (ATTRIB(s) != R_NilValue) {
+          FORWARD_NODE_IF_UNMARKED(ATTRIB(s), forwarded_nodes);
         }
       }
     }
