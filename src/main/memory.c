@@ -245,7 +245,8 @@ static void mem_err_heap(R_size_t size);
 static void mem_err_malloc(R_size_t size);
 
 static SEXPREC UnmarkedNodeTemplate;
-#define NODE_IS_MARKED(s) (MARK(s)==1)
+// #define NODE_IS_MARKED(s) (MARK(s)==1)
+#define NODE_IS_MARKED(s) ((*(int*)s) & 1<<24)
 #define MARK_NODE(s) (MARK(s)=1)
 #define UNMARK_NODE(s) (MARK(s)=0)
 
@@ -504,7 +505,9 @@ typedef union PAGE_HEADER {
    + sizeof(PAGE_HEADER))
 #define NODE_SIZE(c) \
   ((c) == 0 ? sizeof(SEXPREC) : \
-   sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC))
+   ((c) < NUM_SMALL_NODE_CLASSES ? \
+    sizeof(SMALL_SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC) : \
+    sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC) ))
 
 #define PAGE_DATA(p) ((void *) (p + 1))
 #define VHEAP_FREE() (R_VSize - R_LargeVallocSize - R_SmallVallocSize)
@@ -538,7 +541,7 @@ typedef union PAGE_HEADER {
    both counts.*/
 /*#define EXPEL_OLD_TO_NEW*/
 static struct {
-    SEXP New, Free;
+    VECSEXP New;
     int PageCount;
     PAGE_HEADER *pages;
     SEXPREC NewPeg;
@@ -556,38 +559,23 @@ static R_size_t R_NodesInUse = 0;
 
 /* unsnap node s from its list */
 #define UNSNAP_NODE(s) do { \
-  SEXP un__n__ = (s); \
-  SEXP next = NEXT_NODE(un__n__); \
-  SEXP prev = PREV_NODE(un__n__); \
+  VECSEXP un__n__ = (s); \
+  VECSEXP next = NEXT_NODE(un__n__); \
+  VECSEXP prev = PREV_NODE(un__n__); \
   SET_NEXT_NODE(prev, next); \
   SET_PREV_NODE(next, prev); \
 } while(0)
 
 /* snap in node s before node t */
 #define SNAP_NODE(s,t) do { \
-  SEXP sn__n__ = (s); \
-  SEXP next = (t); \
-  SEXP prev = PREV_NODE(next); \
+  VECSEXP sn__n__ = (s); \
+  VECSEXP next = (t); \
+  VECSEXP prev = PREV_NODE(next); \
   SET_NEXT_NODE(sn__n__, next); \
   SET_PREV_NODE(next, sn__n__); \
   SET_NEXT_NODE(prev, sn__n__); \
   SET_PREV_NODE(sn__n__, prev); \
 } while (0)
-
-/* move all nodes on from_peg to to_peg */
-#define BULK_MOVE(from_peg,to_peg) do { \
-  SEXP __from__ = (from_peg); \
-  SEXP __to__ = (to_peg); \
-  SEXP first_old = NEXT_NODE(__from__); \
-  SEXP last_old = PREV_NODE(__from__); \
-  SEXP first_new = NEXT_NODE(__to__); \
-  SET_PREV_NODE(first_old, __to__); \
-  SET_NEXT_NODE(__to__, first_old); \
-  SET_PREV_NODE(first_new, last_old); \
-  SET_NEXT_NODE(last_old, first_new); \
-  SET_NEXT_NODE(__from__, __from__); \
-  SET_PREV_NODE(__from__, __from__); \
-} while (0);
 
 
 /* Processing Node Children */
@@ -687,10 +675,9 @@ void FORWARD_NODE(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
     R_Suicide("ran out of scanning stack");
 }
 
-void FORWARD_NODE_IF_UNMARKED(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
-  if (!NODE_IS_MARKED(s))
-    FORWARD_NODE(s, forwarded_nodes);
-}
+#define FORWARD_NODE_IF_UNMARKED(s, forwarded_nodes) \
+  if (!NODE_IS_MARKED(s)) \
+    FORWARD_NODE(s, forwarded_nodes)
 
 /* This macro should help localize where a FREESXP node is encountered
    in the GC */
@@ -715,12 +702,12 @@ typedef struct free_nodes_struct {
 
 static free_nodes_struct free_nodes[NUM_SMALL_NODE_CLASSES];
 
+  //ATTRIB(__n__) = NULL; 
 #define CLASS_GET_FREE_NODE(c,s) do { \
   if (free_nodes[c].top < 1) { \
     GetNewPage(c); \
   } \
   SEXP __n__ = free_nodes[c].stack[--free_nodes[c].top]; \
-  ATTRIB(__n__) = NULL; \
   R_NodesInUse++; \
   (s) = __n__; \
 } while (0)
@@ -879,9 +866,9 @@ static void custom_node_free(void *ptr);
 static void ReleaseLargeFreeVectors()
 {
     for (int node_class = CUSTOM_NODE_CLASS; node_class <= LARGE_NODE_CLASS; node_class++) {
-	SEXP s = NEXT_NODE(R_GenHeap[node_class].New);
+	VECSEXP s = NEXT_NODE(R_GenHeap[node_class].New);
 	while (s != R_GenHeap[node_class].New) {
-	    SEXP next = NEXT_NODE(s);
+	    VECSEXP next = NEXT_NODE(s);
             if (NODE_IS_MARKED(s) || CHAR(s) == NULL) {
                 UNMARK_NODE(s);
             } else {
@@ -1055,12 +1042,12 @@ static void SortNodes(void)
 		if (! NODE_IS_MARKED(s)) {
 		    ADD_FREE_NODE(i, s);
                     // ZAP all fields
-                    ATTRIB(s) = 0xdeadbeef;
-                    CAR(s) = 0xdeadbeed;
-                    CDR(s) = 0xdeadbe00 + NODE_CLASS(s);
-                    if (NODE_CLASS(s) == 0) {
-                      TAG(s) = 0xdeadbeee;
-                    }
+                    //ATTRIB(s) = 0xdeadbeef;
+                    //CAR(s) = 0xdeadbeed;
+                    //CDR(s) = 0xdeadbe00 + NODE_CLASS(s);
+                    //if (NODE_CLASS(s) == 0) {
+                    //  TAG(s) = 0xdeadbeee;
+                    //}
                     s->sxpinfo.gp = 0;
                     if (TYPEOF(s) != FREESXP) {
                       R_NodesInUse--;
@@ -1488,8 +1475,8 @@ static void process_nodes(forwarded_nodes_struct * forwarded_nodes) {
         case DOTSXP:
         case SYMSXP:
         case BCODESXP:
-          FORWARD_NODE_IF_UNMARKED(TAG(s), forwarded_nodes);
           if (CAR(s) != NULL) FORWARD_NODE_IF_UNMARKED(CAR(s), forwarded_nodes);
+          FORWARD_NODE_IF_UNMARKED(TAG(s), forwarded_nodes);
           FORWARD_NODE_IF_UNMARKED(CDR(s), forwarded_nodes);
           break;
         case EXTPTRSXP:
@@ -1906,9 +1893,6 @@ void attribute_hidden InitMemory()
       SET_PREV_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
       SET_NEXT_NODE(R_GenHeap[i].New, R_GenHeap[i].New);
     }
-
-    for (i = 0; i < NUM_NODE_CLASSES; i++)
-	R_GenHeap[i].Free = NEXT_NODE(R_GenHeap[i].New);
 
     SET_NODE_CLASS(&UnmarkedNodeTemplate, 0);
     orig_R_NSize = R_NSize;
@@ -2542,7 +2526,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    SET_NODE_CLASS(s, node_class);
 	    if (!allocator) R_LargeVallocSize += size;
 	    R_NodesInUse++;
-	    SNAP_NODE(s, R_GenHeap[node_class].New);
+	    SNAP_NODE((VECSEXP)s, R_GenHeap[node_class].New);
 	}
 	ATTRIB(s) = R_NilValue;
 	TYPEOF(s) = type;

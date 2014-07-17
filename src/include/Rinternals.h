@@ -243,15 +243,11 @@ struct promsxp_struct {
 #endif
 #define REFCNTMAX (4 - 1)
 
-#define SEXPREC_HEADER \
-    struct sxpinfo_struct sxpinfo; \
-    struct SEXPREC *attrib; \
-    struct SEXPREC *gengc_next_node, *gengc_prev_node
-
 /* The standard node structure consists of a header followed by the
    node data. */
 typedef struct SEXPREC {
-    SEXPREC_HEADER;
+    struct sxpinfo_struct sxpinfo;
+    struct SEXPREC *attrib;
     union {
 	struct primsxp_struct primsxp;
 	struct symsxp_struct symsxp;
@@ -271,11 +267,20 @@ typedef struct SEXPREC {
    Pentium III where odd word alignment of doubles is allowed but much
    less efficient than even word alignment. */
 typedef struct VECTOR_SEXPREC {
-    SEXPREC_HEADER;
+    struct sxpinfo_struct sxpinfo;
+    struct SEXPREC *attrib;
     struct vecsxp_struct vecsxp;
+    struct VECTOR_SEXPREC *gengc_next_node, *gengc_prev_node;
 } VECTOR_SEXPREC, *VECSEXP;
 
+typedef struct SMALL_VECTOR_SEXPREC {
+    struct sxpinfo_struct sxpinfo;
+    struct SEXPREC *attrib;
+    struct vecsxp_struct vecsxp;
+} SMALL_VECTOR_SEXPREC, *SMALL_VECSEXP;
+
 typedef union { VECTOR_SEXPREC s; double align; } SEXPREC_ALIGN;
+typedef union { SMALL_VECTOR_SEXPREC s; double align; } SMALL_SEXPREC_ALIGN;
 
 /* General Cons Cell Attributes */
 #define ATTRIB(x)	((x)->attrib)
@@ -359,7 +364,8 @@ typedef union { VECTOR_SEXPREC s; double align; } SEXPREC_ALIGN;
 /* Under the generational allocator the data for vector nodes comes
    immediately after the node structure, so the data address is a
    known offset from the node SEXP. */
-#define DATAPTR(x)	(((SEXPREC_ALIGN *) (x)) + 1)
+#define DATAPTR(x)	((x)->sxpinfo.gccls < 6 ? \
+    (SEXPREC_ALIGN*)(((SMALL_SEXPREC_ALIGN *) (x)) + 1) : (((SEXPREC_ALIGN *) (x)) + 1))
 #define CHAR(x)		((const char *) DATAPTR(x))
 #define LOGICAL(x)	((int *) DATAPTR(x))
 #define INTEGER(x)	((int *) DATAPTR(x))
