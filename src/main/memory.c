@@ -498,7 +498,7 @@ typedef union PAGE_HEADER {
   double align;
 } PAGE_HEADER;
 
-#define BASE_PAGE_SIZE 32768
+#define BASE_PAGE_SIZE 8192
 #define R_PAGE_SIZE \
   (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
    * sizeof(SEXPREC) \
@@ -707,7 +707,6 @@ static free_nodes_struct free_nodes[NUM_SMALL_NODE_CLASSES];
     GetNewPage(c); \
   } \
   SEXP __n__ = free_nodes[c].stack[--free_nodes[c].top]; \
-  R_NodesInUse++; \
   (s) = __n__; \
 } while (0)
 
@@ -716,7 +715,9 @@ static free_nodes_struct free_nodes[NUM_SMALL_NODE_CLASSES];
   free_nodes[c].stack[free_nodes[c].top++] = s
 
 #define NO_FREE_NODES() (R_NodesInUse >= R_NSize)
-#define GET_FREE_NODE(s) CLASS_GET_FREE_NODE(0,s)
+#define GET_FREE_NODE(s) \
+  R_NodesInUse++; \
+  CLASS_GET_FREE_NODE(0,s)
 
 
 /* Debugging Routines. */
@@ -882,7 +883,6 @@ static void ReleaseLargeFreeVectors()
 		size = getVecSizeInVEC(s);
 #endif
 		UNSNAP_NODE(s);
-                R_NodesInUse--;
 		if (node_class == LARGE_NODE_CLASS) {
 		    R_LargeVallocSize -= size;
 #ifdef LONG_VECTOR_SUPPORT
@@ -1049,7 +1049,11 @@ static void SortNodes(void)
                     //}
                     s->sxpinfo.gp = 0;
                     if (TYPEOF(s) != FREESXP) {
-                      R_NodesInUse--;
+                      if (NODE_CLASS(s) == 0) {
+                        R_NodesInUse--;
+                      } else {
+                        R_SmallVallocSize -= NodeClassSize[NODE_CLASS(s)];
+                      }
                       TYPEOF(s) = FREESXP;
                     }
                 } else {
@@ -1674,6 +1678,7 @@ static void RunGenCollect(R_size_t size_needed)
 
     DEBUG_CHECK_NODE_COUNTS("after releasing large allocated nodes");
 
+    int old_size = R_NSize;
     ReleaseLargeFreeVectors();
     SortNodes();
 
@@ -1682,13 +1687,6 @@ static void RunGenCollect(R_size_t size_needed)
 
    // printf("sweep\n");
 
-    if (gc_reporting) {
-	REprintf("Garbage collection %d = %d", gc_count, gen_gc_counts[0]);
-	for (i = 0; i < NUM_OLD_GENERATIONS; i++)
-	    REprintf("+%d", gen_gc_counts[i + 1]);
-	REprintf(" (level %d)\n", gens_collected);
-	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
-    }
 }
 
 /* public interface for controlling GC torture settings */
@@ -1798,7 +1796,6 @@ SEXP attribute_hidden do_gc(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
     SEXP value;
     int ogc, reset_max;
-    R_size_t onsize = R_NSize /* can change during collection */;
 
     checkArity(op, args);
     ogc = gc_reporting;
@@ -1812,12 +1809,12 @@ SEXP attribute_hidden do_gc(SEXP call, SEXP op, SEXP args, SEXP rho)
     gc_reporting = ogc;
     /*- now return the [used , gc trigger size] for cells and heap */
     PROTECT(value = allocVector(REALSXP, 14));
-    REAL(value)[0] = onsize - R_Collected;
+    REAL(value)[0] = R_NodesInUse;
     REAL(value)[1] = R_VSize - VHEAP_FREE();
     REAL(value)[4] = R_NSize;
     REAL(value)[5] = R_VSize;
     /* next four are in 0.1Mb, rounded up */
-    REAL(value)[2] = 0.1*ceil(10. * (onsize - R_Collected)/Mega * sizeof(SEXPREC));
+    REAL(value)[2] = 0.1*ceil(10. * R_NodesInUse/Mega * sizeof(SEXPREC));
     REAL(value)[3] = 0.1*ceil(10. * (R_VSize - VHEAP_FREE())/Mega * vsfac);
     REAL(value)[6] = 0.1*ceil(10. * R_NSize/Mega * sizeof(SEXPREC));
     REAL(value)[7] = 0.1*ceil(10. * R_VSize/Mega * vsfac);
@@ -1826,7 +1823,7 @@ SEXP attribute_hidden do_gc(SEXP call, SEXP op, SEXP args, SEXP rho)
     REAL(value)[9] = (R_MaxVSize < R_SIZE_T_MAX) ?
 	0.1*ceil(10. * R_MaxVSize/Mega * vsfac) : NA_REAL;
     if (reset_max){
-	    R_N_maxused = onsize - R_Collected;
+	    R_N_maxused = R_NodesInUse;
 	    R_V_maxused = R_VSize - VHEAP_FREE();
     }
     REAL(value)[10] = R_N_maxused;
@@ -2524,7 +2521,6 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    INIT_REFCNT(s);
 	    SET_NODE_CLASS(s, node_class);
 	    if (!allocator) R_LargeVallocSize += size;
-	    R_NodesInUse++;
 	    SNAP_NODE((VECSEXP)s, R_GenHeap[node_class].New);
 	}
 	ATTRIB(s) = R_NilValue;
@@ -2694,6 +2690,21 @@ static void R_gc_internal(R_size_t size_needed)
     R_N_maxused = R_MAX(R_N_maxused, R_NodesInUse);
     R_V_maxused = R_MAX(R_V_maxused, R_VSize - VHEAP_FREE());
 
+    if (gc_reporting) {
+	REprintf("Garbage collection %d\n", gc_count);
+	ncells = R_NodesInUse;
+	nfrac = (100.0 * ncells) / R_NSize;
+	/* We try to make this consistent with the results returned by gc */
+	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
+	REprintf("%.1f Mbytes of cons cells used (%d%%)\n",
+		 ncells, (int) (nfrac + 0.5));
+	vcells = R_VSize - VHEAP_FREE();
+	vfrac = (100.0 * vcells) / R_VSize;
+	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
+	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
+		 vcells, (int) (vfrac + 0.5));
+    }
+
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
 	gc_start_timing();
@@ -2712,11 +2723,11 @@ static void R_gc_internal(R_size_t size_needed)
     }
 
     if (gc_reporting) {
-	ncells = onsize - R_Collected;
+	ncells = R_NodesInUse;
 	nfrac = (100.0 * ncells) / R_NSize;
 	/* We try to make this consistent with the results returned by gc */
 	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
-	REprintf("\n%.1f Mbytes of cons cells used (%d%%)\n",
+	REprintf("%.1f Mbytes of cons cells used (%d%%)\n",
 		 ncells, (int) (nfrac + 0.5));
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
