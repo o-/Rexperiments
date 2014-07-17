@@ -668,12 +668,11 @@ typedef struct forwarded_nodes_struct {
 
 
 
-void FORWARD_NODE(SEXP s, forwarded_nodes_struct* forwarded_nodes) {
-  if (NODE_IS_MARKED(s)) __asm("int3");
-  forwarded_nodes->stack[forwarded_nodes->top++] = s;
-  if (forwarded_nodes->top >= FORWARD_STACK_SIZE)
-    R_Suicide("ran out of scanning stack");
-}
+//  if (NODE_IS_MARKED(s)) __asm("int3");
+#define FORWARD_NODE(s, forwarded_nodes) \
+  forwarded_nodes->stack[forwarded_nodes->top++] = s; \
+  if (forwarded_nodes->top >= FORWARD_STACK_SIZE) \
+    R_Suicide("ran out of scanning stack")
 
 #define FORWARD_NODE_IF_UNMARKED(s, forwarded_nodes) \
   if (!NODE_IS_MARKED(s)) \
