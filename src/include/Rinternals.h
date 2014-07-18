@@ -188,6 +188,7 @@ typedef struct sxpinfo_struct {
     unsigned int spare :  1;  /* currently unused */
     unsigned int gcgen :  1;  /* old generation number */
     unsigned int gccls :  3;  /* node class */
+    unsigned int generation;
 } sxpinfo_struct; /*		    Tot: 32 */
 
 struct vecsxp_struct {

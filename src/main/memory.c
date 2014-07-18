@@ -34,6 +34,8 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
@@ -499,7 +501,7 @@ typedef union PAGE_HEADER {
   double align;
 } PAGE_HEADER;
 
-#define BASE_PAGE_SIZE 2000
+#define BASE_PAGE_SIZE 8192
 #define R_PAGE_SIZE \
   (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
    * sizeof(SEXPREC) \
@@ -538,14 +540,11 @@ typedef union PAGE_HEADER {
    some ways, but will create more floating garbage and add a bit to
    the execution time, though the difference is probably marginal on
    both counts.*/
-/*#define EXPEL_OLD_TO_NEW*/
 static struct {
     SEXP Old[NUM_OLD_GENERATIONS], New, Free;
     SEXPREC OldPeg[NUM_OLD_GENERATIONS], NewPeg;
-#ifndef EXPEL_OLD_TO_NEW
     SEXP OldToNew[NUM_OLD_GENERATIONS];
     SEXPREC OldToNewPeg[NUM_OLD_GENERATIONS];
-#endif
     int OldCount[NUM_OLD_GENERATIONS], AllocCount, PageCount;
     PAGE_HEADER *pages;
 } R_GenHeap[NUM_NODE_CLASSES];
@@ -618,18 +617,15 @@ static R_size_t R_NodesInUse = 0;
 #endif
 
 #ifdef PROTECTCHECK
-#define FREE_FORWARD_CASE case FREESXP: if (gc_inhibit_release) break;
+#define FREE_FORWARD_CASE case FREESXP: if (gc_inhibit_release) continue;
 #else
 #define FREE_FORWARD_CASE
 #endif
 #define DO_CHILDREN(__n__,dc__action__,dc__extra__) do { \
-  if (HAS_GENUINE_ATTRIB(__n__)) \
-    dc__action__(ATTRIB(__n__), dc__extra__); \
   switch (TYPEOF(__n__)) { \
   case NILSXP: \
   case BUILTINSXP: \
   case SPECIALSXP: \
-  case CHARSXP: \
   case LGLSXP: \
   case INTSXP: \
   case REALSXP: \
@@ -638,13 +634,36 @@ static R_size_t R_NodesInUse = 0;
   case RAWSXP: \
   case S4SXP: \
     break; \
+  case CHARSXP: \
+    if (TYPEOF(ATTRIB(__n__)) == CHARSXP) continue;\
+    break; \
   case STRSXP: \
   case EXPRSXP: \
   case VECSXP: \
     { \
-      int i; \
-      for (i = 0; i < LENGTH(__n__); i++) \
-	dc__action__(STRING_ELT(__n__, i), dc__extra__); \
+      int l = LENGTH(s); \
+      int r = l%8; \
+      int i = r-8; \
+      switch(r) { \
+        for (; i < l; i += 8) { \
+            dc__action__(STRING_ELT(__n__, i), dc__extra__); \
+          case 7: \
+            dc__action__(STRING_ELT(__n__, i+1), dc__extra__); \
+          case 6: \
+            dc__action__(STRING_ELT(__n__, i+2), dc__extra__); \
+          case 5: \
+            dc__action__(STRING_ELT(__n__, i+3), dc__extra__); \
+          case 4: \
+            dc__action__(STRING_ELT(__n__, i+4), dc__extra__); \
+          case 3: \
+            dc__action__(STRING_ELT(__n__, i+5), dc__extra__); \
+          case 2: \
+            dc__action__(STRING_ELT(__n__, i+6), dc__extra__); \
+          case 1: \
+            dc__action__(STRING_ELT(__n__, i+7), dc__extra__); \
+          case 0: {} \
+        } \
+      } \
     } \
     break; \
   case ENVSXP: \
@@ -671,6 +690,8 @@ static R_size_t R_NodesInUse = 0;
   default: \
     register_bad_sexp_type(__n__, __LINE__);		\
   } \
+  if (ATTRIB(__n__) != R_NilValue) \
+    dc__action__(ATTRIB(__n__), dc__extra__); \
 } while(0)
 
 
@@ -1122,12 +1143,8 @@ static void AgeNodeAndChildren(SEXP s, int gen)
 
 static void old_to_new(SEXP x, SEXP y)
 {
-#ifdef EXPEL_OLD_TO_NEW
-    AgeNodeAndChildren(y, NODE_GENERATION(x));
-#else
     UNSNAP_NODE(x);
     SNAP_NODE(x, R_GenHeap[NODE_CLASS(x)].OldToNew[NODE_GENERATION(x)]);
-#endif
 }
 
 #ifdef COMPUTE_REFCNT_VALUES
@@ -1524,15 +1541,15 @@ static void FindGeneration(SEXP ptr) {
 
 /* The Generational Collector. */
 
-#define PROCESS_NODES() do { \
-    while (forwarded_nodes != NULL) { \
-	s = forwarded_nodes; \
-	forwarded_nodes = NEXT_NODE(forwarded_nodes); \
-	SNAP_NODE(s, R_GenHeap[NODE_CLASS(s)].Old[NODE_GENERATION(s)]); \
-	R_GenHeap[NODE_CLASS(s)].OldCount[NODE_GENERATION(s)]++; \
-	FORWARD_CHILDREN(s); \
-    } \
-} while (0)
+void ProcessNodes(SEXP forwarded_nodes) {
+    while (forwarded_nodes != NULL) {
+	SEXP s = forwarded_nodes;
+	forwarded_nodes = NEXT_NODE(forwarded_nodes);
+	SNAP_NODE(s, R_GenHeap[NODE_CLASS(s)].Old[NODE_GENERATION(s)]);
+	R_GenHeap[NODE_CLASS(s)].OldCount[NODE_GENERATION(s)]++;
+	FORWARD_CHILDREN(s);
+    }
+}
 
 static void RunGenCollect(R_size_t size_needed)
 {
@@ -1560,7 +1577,6 @@ static void RunGenCollect(R_size_t size_needed)
  again:
     gens_collected = num_old_gens_to_collect;
 
-#ifndef EXPEL_OLD_TO_NEW
     /* eliminate old-to-new references in generations to collect by
        transferring referenced nodes to referring generation */
     for (gen = 0; gen < num_old_gens_to_collect; gen++) {
@@ -1577,7 +1593,6 @@ static void RunGenCollect(R_size_t size_needed)
 	    }
 	}
     }
-#endif
 
     DEBUG_CHECK_NODE_COUNTS("at start");
 
@@ -1601,7 +1616,6 @@ static void RunGenCollect(R_size_t size_needed)
 
     forwarded_nodes = NULL;
 
-#ifndef EXPEL_OLD_TO_NEW
     /* scan nodes in uncollected old generations with old-to-new pointers */
     for (gen = num_old_gens_to_collect; gen < NUM_OLD_GENERATIONS; gen++)
 	for (i = 0; i < NUM_NODE_CLASSES; i++)
@@ -1609,7 +1623,6 @@ static void RunGenCollect(R_size_t size_needed)
 		 s != R_GenHeap[i].OldToNew[gen];
 		 s = NEXT_NODE(s))
 		FORWARD_CHILDREN(s);
-#endif
 
     /* forward all roots */
     FORWARD_NODE(R_NilValue);	           /* Builtin constants */
@@ -1673,7 +1686,8 @@ static void RunGenCollect(R_size_t size_needed)
 	FORWARD_NODE(*sp);
 
     /* main processing loop */
-    PROCESS_NODES();
+    ProcessNodes(forwarded_nodes);
+    forwarded_nodes = NULL;
 
     /* identify weakly reachable nodes */
     {
@@ -1692,7 +1706,8 @@ static void RunGenCollect(R_size_t size_needed)
 		    }
 		}
 	    }
-	    PROCESS_NODES();
+	    ProcessNodes(forwarded_nodes);
+            forwarded_nodes = NULL;
 	} while (recheck_weak_refs);
     }
 
@@ -1706,12 +1721,13 @@ static void RunGenCollect(R_size_t size_needed)
 	FORWARD_NODE(WEAKREF_VALUE(s));
 	FORWARD_NODE(WEAKREF_FINALIZER(s));
     }
-    PROCESS_NODES();
+    ProcessNodes(forwarded_nodes);
+    forwarded_nodes = NULL;
 
     DEBUG_CHECK_NODE_COUNTS("after processing forwarded list");
 
     /* process CHARSXP cache */
-    if (R_StringHash != NULL) /* in case of GC during initialization */
+    if (R_StringHash != NULL && num_old_gens_to_collect > 0) /* in case of GC during initialization */
     {
 	SEXP t;
 	int nc = 0;
@@ -1737,7 +1753,8 @@ static void RunGenCollect(R_size_t size_needed)
 	SET_TRUELENGTH(R_StringHash, nc); /* SET_HASHPRI, really */
     }
     FORWARD_NODE(R_StringHash);
-    PROCESS_NODES();
+    ProcessNodes(forwarded_nodes);
+    forwarded_nodes = NULL;
 
 #ifdef PROTECTCHECK
     for(i=0; i< NUM_SMALL_NODE_CLASSES;i++){
@@ -1777,8 +1794,10 @@ static void RunGenCollect(R_size_t size_needed)
 	    s = next;
 	}
     }
-    if (gc_inhibit_release)
-	PROCESS_NODES();
+    if (gc_inhibit_release) {
+	ProcessNodes(forwarded_nodes);
+        forwarded_nodes = NULL;
+    }
 #endif
 
     /* release large vector allocations */
@@ -2064,11 +2083,9 @@ void attribute_hidden InitMemory()
 	SET_PREV_NODE(R_GenHeap[i].Old[gen], R_GenHeap[i].Old[gen]);
 	SET_NEXT_NODE(R_GenHeap[i].Old[gen], R_GenHeap[i].Old[gen]);
 
-#ifndef EXPEL_OLD_TO_NEW
 	R_GenHeap[i].OldToNew[gen] = &R_GenHeap[i].OldToNewPeg[gen];
 	SET_PREV_NODE(R_GenHeap[i].OldToNew[gen], R_GenHeap[i].OldToNew[gen]);
 	SET_NEXT_NODE(R_GenHeap[i].OldToNew[gen], R_GenHeap[i].OldToNew[gen]);
-#endif
 
 	R_GenHeap[i].OldCount[gen] = 0;
       }
@@ -2861,6 +2878,8 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
+static struct timespec total;
+
 static void R_gc_internal(R_size_t size_needed)
 {
     R_size_t onsize = R_NSize /* can change during collection */;
@@ -2881,6 +2900,25 @@ static void R_gc_internal(R_size_t size_needed)
 
     R_N_maxused = R_MAX(R_N_maxused, R_NodesInUse);
     R_V_maxused = R_MAX(R_V_maxused, R_VSize - VHEAP_FREE());
+
+    struct timespec tps, tpe;
+    if (gc_reporting) {
+        clock_gettime(CLOCK_REALTIME, &tps);
+	REprintf("Garbage collection %d\n", gc_count);
+	ncells = R_NodesInUse;
+	nfrac = (100.0 * ncells) / R_NSize;
+	/* We try to make this consistent with the results returned by gc */
+	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
+	REprintf("%.1f Mbytes of cons cells used (%d%%)\n",
+		 ncells, (int) (nfrac + 0.5));
+	vcells = R_VSize - VHEAP_FREE();
+	vfrac = (100.0 * vcells) / R_VSize;
+	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+
+    }
 
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
@@ -2904,13 +2942,33 @@ static void R_gc_internal(R_size_t size_needed)
 	nfrac = (100.0 * ncells) / R_NSize;
 	/* We try to make this consistent with the results returned by gc */
 	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
-	REprintf("\n%.1f Mbytes of cons cells used (%d%%)\n",
+	REprintf("%.1f Mbytes of cons cells used (%d%%)\n",
 		 ncells, (int) (nfrac + 0.5));
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+
+        clock_gettime(CLOCK_REALTIME, &tpe);
+        int ds = tpe.tv_sec-tps.tv_sec;
+        long dns;
+        if (ds > 0) {
+          dns = tpe.tv_nsec + 1000000000 - tps.tv_nsec;
+        } else {
+          dns = tpe.tv_nsec-tps.tv_nsec;
+        }
+        total.tv_nsec += dns;
+        if (total.tv_nsec > 1000000000L) {
+          long ds = total.tv_nsec / 1000000000L;
+          total.tv_sec += ds;
+          total.tv_nsec -= ds * 1000000000L;
+        }
+
+        printf("Spent      %lu ms\n", dns / 1000000);
+        printf("Total %lu s, %lu ms\n", total.tv_sec, total.tv_nsec / 1000000);
+
     }
 
 #ifdef IMMEDIATE_FINALIZERS
