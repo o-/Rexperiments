@@ -34,6 +34,8 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
@@ -2669,6 +2671,8 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
+static struct timespec total;
+
 static void R_gc_internal(R_size_t size_needed)
 {
     R_size_t onsize = R_NSize /* can change during collection */;
@@ -2690,7 +2694,9 @@ static void R_gc_internal(R_size_t size_needed)
     R_N_maxused = R_MAX(R_N_maxused, R_NodesInUse);
     R_V_maxused = R_MAX(R_V_maxused, R_VSize - VHEAP_FREE());
 
+    struct timespec tps, tpe;
     if (gc_reporting) {
+        clock_gettime(CLOCK_REALTIME, &tps);
 	REprintf("Garbage collection %d\n", gc_count);
 	ncells = R_NodesInUse;
 	nfrac = (100.0 * ncells) / R_NSize;
@@ -2701,8 +2707,10 @@ static void R_gc_internal(R_size_t size_needed)
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+
     }
 
     BEGIN_SUSPEND_INTERRUPTS {
@@ -2732,8 +2740,27 @@ static void R_gc_internal(R_size_t size_needed)
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+        clock_gettime(CLOCK_REALTIME, &tpe);
+        int ds = tpe.tv_sec-tps.tv_sec;
+        long dns;
+        if (ds > 0) {
+          dns = tpe.tv_nsec + 1000000000 - tps.tv_nsec;
+        } else {
+          dns = tpe.tv_nsec-tps.tv_nsec;
+        }
+        total.tv_nsec += dns;
+        if (total.tv_nsec > 1000000000L) {
+          long ds = total.tv_nsec / 1000000000L;
+          total.tv_sec += ds;
+          total.tv_nsec -= ds * 1000000000L;
+        }
+
+        printf("Spent      %lu ms\n", dns / 1000000);
+        printf("Total %lu s, %lu ms\n", total.tv_sec, total.tv_nsec / 1000000);
+
     }
 
 #ifdef IMMEDIATE_FINALIZERS
