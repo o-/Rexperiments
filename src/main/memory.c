@@ -34,6 +34,8 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
@@ -245,10 +247,16 @@ static void mem_err_heap(R_size_t size);
 static void mem_err_malloc(R_size_t size);
 
 static SEXPREC UnmarkedNodeTemplate;
-// #define NODE_IS_MARKED(s) (MARK(s)==1)
-#define NODE_IS_MARKED(s) ((*(int*)s) & 1<<24)
-#define MARK_NODE(s) (MARK(s)=1)
-#define UNMARK_NODE(s) (MARK(s)=0)
+//#define NODE_IS_MARKED(s) (MARK(s)==1)
+//#define MARK_NODE(s) (MARK(s)=1)
+//#define UNMARK_NODE(s) (MARK(s)=0)
+
+
+#define MARK_BYTE(s) (GET_PAGE_PTR(s)->map[(s)->sxpinfo.idx])
+
+#define NODE_IS_MARKED(s) MARK_BYTE(s)
+#define MARK_NODE(s) (MARK_BYTE(s) = 1)
+#define UNMARK_NODE(s) (MARK_BYTE(s) = 0)
 
 
 /* Tuning Constants. Most of these could be made settable from R,
@@ -493,23 +501,30 @@ static int collect_counts[NUM_OLD_GENERATIONS];
    from fixed size pages.  The pages for each node class are kept in a
    linked list. */
 
-typedef union PAGE_HEADER {
-  union PAGE_HEADER *next;
-  double align;
+#define R_PAGE_SIZE (1<<12)
+#define R_PAGE_MASK (~(R_PAGE_SIZE-1))
+
+#define GET_PAGE_PTR(s) ((PAGE_HEADER*)((uintptr_t)(s) & R_PAGE_MASK))
+
+// #define R_PAGE_SIZE \
+//   (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
+//    * sizeof(SEXPREC) \
+//   + sizeof(PAGE_HEADER))
+
+typedef struct PAGE_HEADER {
+  struct PAGE_HEADER *next;
+  void * malloc_start;
+  char * map;
+  char * old[3];
 } PAGE_HEADER;
 
-#define BASE_PAGE_SIZE 8192
-#define R_PAGE_SIZE \
-  (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
-   * sizeof(SEXPREC) \
-   + sizeof(PAGE_HEADER))
 #define NODE_SIZE(c) \
   ((c) == 0 ? sizeof(SEXPREC) : \
    ((c) < NUM_SMALL_NODE_CLASSES ? \
     sizeof(SMALL_SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC) : \
     sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC) ))
 
-#define PAGE_DATA(p) ((void *) (p + 1))
+#define PAGE_DATA(p) ((void*) (((PAGE_HEADER *)p) + 1))
 #define VHEAP_FREE() (R_VSize - R_LargeVallocSize - R_SmallVallocSize)
 
 
@@ -772,19 +787,28 @@ static void GetNewPage(int node_class)
     int node_size, page_count, i;  // FIXME: longer type?
 
     node_size = NODE_SIZE(node_class);
+
     page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
 
-    page = malloc(R_PAGE_SIZE);
+    void * new_mem = malloc(2*R_PAGE_SIZE);
+
     if (page == NULL) {
 	R_gc_full(0);
-	page = malloc(R_PAGE_SIZE);
+	page = malloc(2*R_PAGE_SIZE);
 	if (page == NULL)
 	    mem_err_malloc((R_size_t) R_PAGE_SIZE);
     }
+
+    page = GET_PAGE_PTR((uintptr_t)new_mem+R_PAGE_SIZE);
+    page->malloc_start = new_mem;
+
     R_ReportNewPage();
     page->next = R_GenHeap[node_class].pages;
     R_GenHeap[node_class].pages = page;
     R_GenHeap[node_class].PageCount++;
+
+    page->map = malloc(page_count);
+    memset(page->map, 0, page_count);
 
     data = PAGE_DATA(page);
     for (i = 0; i < page_count; i++, data += node_size) {
@@ -801,6 +825,7 @@ static void GetNewPage(int node_class)
 #endif
 #endif
 	s->sxpinfo = UnmarkedNodeTemplate.sxpinfo;
+	s->sxpinfo.idx = i;
 	INIT_REFCNT(s);
 	SET_NODE_CLASS(s, node_class);
 	TYPEOF(s) = NEWSXP;
@@ -818,7 +843,8 @@ static void ReleasePage(PAGE_HEADER *page, int node_class)
     data = PAGE_DATA(page);
 
     R_GenHeap[node_class].PageCount--;
-    free(page);
+    free(page->map);
+    free(page->malloc_start);
 }
 
 static int release_count = 0;
@@ -2669,6 +2695,8 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
+static struct timespec total;
+
 static void R_gc_internal(R_size_t size_needed)
 {
     R_size_t onsize = R_NSize /* can change during collection */;
@@ -2690,7 +2718,9 @@ static void R_gc_internal(R_size_t size_needed)
     R_N_maxused = R_MAX(R_N_maxused, R_NodesInUse);
     R_V_maxused = R_MAX(R_V_maxused, R_VSize - VHEAP_FREE());
 
+    struct timespec tps, tpe;
     if (gc_reporting) {
+      clock_gettime(CLOCK_REALTIME, &tps);
 	REprintf("Garbage collection %d\n", gc_count);
 	ncells = R_NodesInUse;
 	nfrac = (100.0 * ncells) / R_NSize;
@@ -2701,8 +2731,8 @@ static void R_gc_internal(R_size_t size_needed)
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
+	REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+		 vcells, (int) (vfrac + 0.5), 100.0*R_LargeVallocSize/R_VSize );
     }
 
     BEGIN_SUSPEND_INTERRUPTS {
@@ -2734,6 +2764,23 @@ static void R_gc_internal(R_size_t size_needed)
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
 	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
 		 vcells, (int) (vfrac + 0.5));
+      clock_gettime(CLOCK_REALTIME, &tpe);
+        int ds = tpe.tv_sec-tps.tv_sec;
+        long dns;
+        if (ds > 0) {
+          dns = tpe.tv_nsec + 1000000000 - tps.tv_nsec;
+        } else {
+          dns = tpe.tv_nsec-tps.tv_nsec;
+        }
+        total.tv_nsec += dns;
+        if (total.tv_nsec > 1000000000L) {
+          long ds = total.tv_nsec / 1000000000L;
+          total.tv_sec += ds;
+          total.tv_nsec -= ds * 1000000000L;
+        }
+
+        printf("Spent      %lu ms\n", dns / 1000000);
+        printf("Total %lu s, %lu ms\n", total.tv_sec, total.tv_nsec / 1000000);
     }
 
 #ifdef IMMEDIATE_FINALIZERS
