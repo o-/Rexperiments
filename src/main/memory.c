@@ -34,6 +34,8 @@
 #include <config.h>
 #endif
 
+#include <time.h>
+
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
@@ -2813,6 +2815,8 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
+static struct timespec total_0, total_1, total_2;
+
 static void R_gc_internal(R_size_t size_needed)
 {
     R_size_t onsize = R_NSize /* can change during collection */;
@@ -2833,6 +2837,25 @@ static void R_gc_internal(R_size_t size_needed)
 
     R_N_maxused = R_MAX(R_N_maxused, R_NodesInUse);
     R_V_maxused = R_MAX(R_V_maxused, R_VSize - VHEAP_FREE());
+
+    struct timespec tps, tpe;
+    if (gc_reporting) {
+        clock_gettime(CLOCK_REALTIME, &tps);
+	REprintf("Garbage collection %d\n", gc_count);
+	ncells = R_NodesInUse;
+	nfrac = (100.0 * ncells) / R_NSize;
+	/* We try to make this consistent with the results returned by gc */
+	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
+	REprintf("%.1f Mbytes of cons cells used (%d%%)\n",
+		 ncells, (int) (nfrac + 0.5));
+	vcells = R_VSize - VHEAP_FREE();
+	vfrac = (100.0 * vcells) / R_VSize;
+	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+
+    }
 
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
@@ -2861,8 +2884,37 @@ static void R_gc_internal(R_size_t size_needed)
 	vcells = R_VSize - VHEAP_FREE();
 	vfrac = (100.0 * vcells) / R_VSize;
 	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
+        REprintf("%.1f Mbytes of vectors used (%d%%) (%d%% variable)\n",
+                 vcells, (int) (vfrac + 0.5),
+                 (int)(100.0*(double)R_LargeVallocSize/(double)R_VSize));
+        clock_gettime(CLOCK_REALTIME, &tpe);
+        int ds = tpe.tv_sec-tps.tv_sec;
+        long dns;
+        if (ds > 0) {
+          dns = tpe.tv_nsec + 1000000000 - tps.tv_nsec;
+        } else {
+          dns = tpe.tv_nsec-tps.tv_nsec;
+        }
+        struct timespec total;
+        if (num_old_gens_to_collect == 0) {
+          total = total_0;
+        } else if (num_old_gens_to_collect == 1) {
+          total = total_1;
+        } else {
+          total = total_2;
+        }
+        total.tv_nsec += dns;
+        if (total.tv_nsec > 1000000000L) {
+          long ds = total.tv_nsec / 1000000000L;
+          total.tv_sec += ds;
+          total.tv_nsec -= ds * 1000000000L;
+        }
+
+        printf("Spent      %lu us\n", dns / 1000);
+        printf("Total_0 %lu s, %lu ms\n", total_0.tv_sec, total_0.tv_nsec / 1000000);
+        printf("Total_1 %lu s, %lu ms\n", total_1.tv_sec, total_1.tv_nsec / 1000000);
+        printf("Total_2 %lu s, %lu ms\n", total_2.tv_sec, total_2.tv_nsec / 1000000);
+
     }
 
 #ifdef IMMEDIATE_FINALIZERS
