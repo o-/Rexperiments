@@ -1727,7 +1727,7 @@ static void RunGenCollect(R_size_t size_needed)
     DEBUG_CHECK_NODE_COUNTS("after processing forwarded list");
 
     /* process CHARSXP cache */
-    if (R_StringHash != NULL && num_old_gens_to_collect > 0) /* in case of GC during initialization */
+    if (R_StringHash != NULL) /* in case of GC during initialization */
     {
 	SEXP t;
 	int nc = 0;
