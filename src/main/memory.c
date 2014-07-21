@@ -1496,8 +1496,11 @@ SEXP attribute_hidden do_regFinaliz(SEXP call, SEXP op, SEXP args, SEXP rho)
     } \
 } while (0)
 
-static void RunGenCollect(R_size_t size_needed)
+static int RunGenCollect(R_size_t size_needed)
 {
+    static struct timespec profile[10];
+
+
     int i, gen, gens_collected;
     RCNTXT *ctxt;
     SEXP s;
@@ -1518,6 +1521,9 @@ static void RunGenCollect(R_size_t size_needed)
 #ifdef PROTECTCHECK
     num_old_gens_to_collect = NUM_OLD_GENERATIONS;
 #endif
+
+    int ppi = 0;
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
 
  again:
     gens_collected = num_old_gens_to_collect;
@@ -1541,6 +1547,7 @@ static void RunGenCollect(R_size_t size_needed)
     }
 #endif
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     DEBUG_CHECK_NODE_COUNTS("at start");
 
     /* unmark all marked nodes in old generations to be collected and
@@ -1561,6 +1568,7 @@ static void RunGenCollect(R_size_t size_needed)
 	}
     }
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     forwarded_nodes = NULL;
 
 #ifndef EXPEL_OLD_TO_NEW
@@ -1573,6 +1581,7 @@ static void RunGenCollect(R_size_t size_needed)
 		FORWARD_CHILDREN(s);
 #endif
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* forward all roots */
     FORWARD_NODE(R_NilValue);	           /* Builtin constants */
     FORWARD_NODE(NA_STRING);
@@ -1634,9 +1643,11 @@ static void RunGenCollect(R_size_t size_needed)
     for (SEXP *sp = R_BCNodeStackBase; sp < R_BCNodeStackTop; sp++)
 	FORWARD_NODE(*sp);
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* main processing loop */
     PROCESS_NODES();
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* identify weakly reachable nodes */
     {
 	Rboolean recheck_weak_refs;
@@ -1661,6 +1672,7 @@ static void RunGenCollect(R_size_t size_needed)
     /* mark nodes ready for finalizing */
     CheckFinalizers();
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* process the weak reference chain */
     for (s = R_weak_refs; s != R_NilValue; s = WEAKREF_NEXT(s)) {
 	FORWARD_NODE(s);
@@ -1672,6 +1684,7 @@ static void RunGenCollect(R_size_t size_needed)
 
     DEBUG_CHECK_NODE_COUNTS("after processing forwarded list");
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* process CHARSXP cache */
     if (R_StringHash != NULL) /* in case of GC during initialization */
     {
@@ -1743,6 +1756,7 @@ static void RunGenCollect(R_size_t size_needed)
 	PROCESS_NODES();
 #endif
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     /* release large vector allocations */
     ReleaseLargeFreeVectors();
 
@@ -1811,13 +1825,27 @@ static void RunGenCollect(R_size_t size_needed)
 	SortNodes();
 #endif
 
+    clock_gettime(CLOCK_REALTIME, &profile[ppi++]);
     if (gc_reporting) {
+      if (profile[0].tv_sec == profile[8].tv_sec)
+        printf("Profile: %lu, %lu, %lu, %lu, %lu, %lu, %lu, %lu\n",
+            (profile[1].tv_nsec - profile[0].tv_nsec) / 1000,
+            (profile[2].tv_nsec - profile[1].tv_nsec) / 1000,
+            (profile[3].tv_nsec - profile[2].tv_nsec) / 1000,
+            (profile[4].tv_nsec - profile[3].tv_nsec) / 1000,
+            (profile[5].tv_nsec - profile[4].tv_nsec) / 1000,
+            (profile[6].tv_nsec - profile[5].tv_nsec) / 1000,
+            (profile[7].tv_nsec - profile[6].tv_nsec) / 1000,
+            (profile[8].tv_nsec - profile[7].tv_nsec) / 1000,
+            (profile[9].tv_nsec - profile[8].tv_nsec) / 1000
+        );
 	REprintf("Garbage collection %d = %d", gc_count, gen_gc_counts[0]);
 	for (i = 0; i < NUM_OLD_GENERATIONS; i++)
 	    REprintf("+%d", gen_gc_counts[i + 1]);
 	REprintf(" (level %d) ... ", gens_collected);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
     }
+    return gens_collected;
 }
 
 /* public interface for controlling GC torture settings */
@@ -2815,7 +2843,7 @@ static void gc_end_timing(void)
 
 #define R_MAX(a,b) (a) < (b) ? (b) : (a)
 
-static struct timespec total_0, total_1, total_2;
+static struct timespec total[3];
 
 static void R_gc_internal(R_size_t size_needed)
 {
@@ -2857,10 +2885,11 @@ static void R_gc_internal(R_size_t size_needed)
 
     }
 
+    int gens_collected;
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
 	gc_start_timing();
-	RunGenCollect(size_needed);
+	gens_collected = RunGenCollect(size_needed);
 	gc_end_timing();
 	R_in_gc = FALSE;
     } END_SUSPEND_INTERRUPTS;
@@ -2895,25 +2924,17 @@ static void R_gc_internal(R_size_t size_needed)
         } else {
           dns = tpe.tv_nsec-tps.tv_nsec;
         }
-        struct timespec total;
-        if (num_old_gens_to_collect == 0) {
-          total = total_0;
-        } else if (num_old_gens_to_collect == 1) {
-          total = total_1;
-        } else {
-          total = total_2;
-        }
-        total.tv_nsec += dns;
-        if (total.tv_nsec > 1000000000L) {
-          long ds = total.tv_nsec / 1000000000L;
-          total.tv_sec += ds;
-          total.tv_nsec -= ds * 1000000000L;
+        total[gens_collected].tv_nsec += dns;
+        if (total[gens_collected].tv_nsec > 1000000000L) {
+          long ds = total[gens_collected].tv_nsec / 1000000000L;
+          total[gens_collected].tv_sec += ds;
+          total[gens_collected].tv_nsec -= ds * 1000000000L;
         }
 
         printf("Spent      %lu us\n", dns / 1000);
-        printf("Total_0 %lu s, %lu ms\n", total_0.tv_sec, total_0.tv_nsec / 1000000);
-        printf("Total_1 %lu s, %lu ms\n", total_1.tv_sec, total_1.tv_nsec / 1000000);
-        printf("Total_2 %lu s, %lu ms\n", total_2.tv_sec, total_2.tv_nsec / 1000000);
+        printf("Total_0 %lu s, %lu ms\n", total[0].tv_sec, total[0].tv_nsec / 1000000);
+        printf("Total_1 %lu s, %lu ms\n", total[1].tv_sec, total[1].tv_nsec / 1000000);
+        printf("Total_2 %lu s, %lu ms\n", total[2].tv_sec, total[2].tv_nsec / 1000000);
 
     }
 
