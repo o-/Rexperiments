@@ -39,6 +39,8 @@
 #include <R_ext/RS.h> /* for S4 allocation */
 #include <R_ext/Print.h>
 
+#include <pthread.h>
+
 /* Declarations for Valgrind.
 
    These are controlled by the
@@ -331,9 +333,9 @@ static int R_NGrowIncrMin = 50000, R_NShrinkIncrMin = 0;
 static double R_VGrowIncrFrac = 0.0, R_VShrinkIncrFrac = 0.2;
 static int R_VGrowIncrMin = 100000, R_VShrinkIncrMin = 0;
 #else
-static double R_NGrowIncrFrac = 0.05, R_NShrinkIncrFrac = 0.2;
+static double R_NGrowIncrFrac = 0.1, R_NShrinkIncrFrac = 0.2;
 static int R_NGrowIncrMin = 40000, R_NShrinkIncrMin = 0;
-static double R_VGrowIncrFrac = 0.05, R_VShrinkIncrFrac = 0.2;
+static double R_VGrowIncrFrac = 0.1, R_VShrinkIncrFrac = 0.2;
 static int R_VGrowIncrMin = 80000, R_VShrinkIncrMin = 0;
 #endif
 
@@ -1551,6 +1553,29 @@ void ProcessNodes(SEXP forwarded_nodes) {
     }
 }
 
+void UnmarkNodes(int start_class, int end_class) {
+    for (int gen = 0; gen < num_old_gens_to_collect; gen++) {
+        for (int i = start_class; i < NUM_NODE_CLASSES; i++) {
+	    R_GenHeap[i].OldCount[gen] = 0;
+	    SEXP s = NEXT_NODE(R_GenHeap[i].Old[gen]);
+	    while (s != R_GenHeap[i].Old[gen]) {
+		SEXP next = NEXT_NODE(s);
+		if (gen < NUM_OLD_GENERATIONS - 1)
+		    SET_NODE_GENERATION(s, gen + 1);
+		UNMARK_NODE(s);
+		s = next;
+	    }
+	    if (NEXT_NODE(R_GenHeap[i].Old[gen]) != R_GenHeap[i].Old[gen])
+		BULK_MOVE(R_GenHeap[i].Old[gen], R_GenHeap[i].New);
+	}
+    }
+}
+
+void * UnmarkLowerNodes(void * unused) {
+  UnmarkNodes(0, 3);
+}
+
+
 static void RunGenCollect(R_size_t size_needed)
 {
     int i, gen, gens_collected;
@@ -1598,21 +1623,20 @@ static void RunGenCollect(R_size_t size_needed)
 
     /* unmark all marked nodes in old generations to be collected and
        move to New space */
-    for (gen = 0; gen < num_old_gens_to_collect; gen++) {
-	for (i = 0; i < NUM_NODE_CLASSES; i++) {
-	    R_GenHeap[i].OldCount[gen] = 0;
-	    s = NEXT_NODE(R_GenHeap[i].Old[gen]);
-	    while (s != R_GenHeap[i].Old[gen]) {
-		SEXP next = NEXT_NODE(s);
-		if (gen < NUM_OLD_GENERATIONS - 1)
-		    SET_NODE_GENERATION(s, gen + 1);
-		UNMARK_NODE(s);
-		s = next;
-	    }
-	    if (NEXT_NODE(R_GenHeap[i].Old[gen]) != R_GenHeap[i].Old[gen])
-		BULK_MOVE(R_GenHeap[i].Old[gen], R_GenHeap[i].New);
-	}
-    }
+    pthread_t thread[1];
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+//    int rc = pthread_create(&thread[0], &attr, UnmarkLowerNodes, NULL);
+//    if (rc) {
+//      R_Suicide("ERROR; return code from pthread_create() not zero");
+//    }
+    UnmarkNodes(0, 6);
+    pthread_attr_destroy(&attr);
+//    rc  = pthread_join(thread[0], NULL);
+//    if (rc) {
+//      R_Suicide("ERROR; return code from pthread_join()");
+//    }
 
     forwarded_nodes = NULL;
 
@@ -2513,6 +2537,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
 	    SET_SHORT_VEC_TRUELENGTH(s, 0);
 	    SET_NAMED(s, 0);
 	    INIT_REFCNT(s);
+	    UNMARK_NODE(s);
 	    return(s);
 	}
     }
@@ -2781,6 +2806,7 @@ SEXP allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocator)
     else if (type == RAWSXP)
 	VALGRIND_MAKE_WRITABLE(RAW(s), actual_size);
 #endif
+    UNMARK_NODE(s);
     return s;
 }
 
