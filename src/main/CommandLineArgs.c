@@ -144,6 +144,9 @@ R_common_command_line(int *pac, char **argv, Rstart Rp)
 	    else if (!strcmp(*av, "--no-environ")) {
 		Rp->NoRenviron = TRUE;
 	    }
+	    else if (!strcmp(*av, "--gc-spy")) {
+		Rp->R_GCSpy = TRUE;
+	    }
 	    else if (!strcmp(*av, "--verbose")) {
 		Rp->R_Verbose = TRUE;
 	    }

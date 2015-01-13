@@ -27,6 +27,7 @@
  *	and reset the stack pointer.
  */
 
+#define ENABLE_GCSPY
 #define USE_RINTERNALS
 
 #include <stdarg.h>
@@ -506,12 +507,21 @@ static int collect_counts[NUM_OLD_GENERATIONS];
    from fixed size pages.  The pages for each node class are kept in a
    linked list. */
 
-typedef union PAGE_HEADER {
-  union PAGE_HEADER *next;
-  double align;
-} PAGE_HEADER;
+typedef struct PAGE_HEADER PAGE_HEADER;
+struct PAGE_HEADER {
+  union {
+    PAGE_HEADER *next;
+    double align;
+  };
+#ifdef ENABLE_GCSPY
+  unsigned int number;
+  unsigned int num_alloc;
+  unsigned int num_old[NUM_OLD_GENERATIONS];
+#endif
+};
 
 #define BASE_PAGE_SIZE 2000
+#define R_PAGE_ALIGNED 2048
 #define R_PAGE_SIZE \
   (((BASE_PAGE_SIZE - sizeof(PAGE_HEADER)) / sizeof(SEXPREC)) \
    * sizeof(SEXPREC) \
@@ -520,7 +530,7 @@ typedef union PAGE_HEADER {
   ((c) == 0 ? sizeof(SEXPREC) : \
    sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC))
 
-#define PAGE_DATA(p) ((void *) (p + 1))
+#define PAGE_DATA(p) ((uintptr_t)p + sizeof(PAGE_HEADER))
 #define VHEAP_FREE() (R_VSize - R_LargeVallocSize - R_SmallVallocSize)
 
 
@@ -686,6 +696,34 @@ static R_size_t R_NodesInUse = 0;
 } while(0)
 
 
+#ifdef ENABLE_GCSPY
+PAGE_HEADER * getPage(SEXP s);
+void GCSPY_NODE_ALLOC(SEXP s) {
+  if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES)
+    getPage(s)->num_alloc++;
+}
+
+void GCSPY_NODE_PROMOTED(SEXP s) {
+  if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES) {
+    getPage(s)->num_old[NODE_GENERATION(s)]++;
+  }
+}
+
+void GCSPY_NODE_TO_COLLECT(SEXP s) {
+  if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES) {
+    if (getPage(s)->num_old[NODE_GENERATION(s)] == 0) {
+      __asm("int3");
+    }
+    getPage(s)->num_old[NODE_GENERATION(s)]--;
+  }
+}
+
+#else
+#define GCSPY_NODE_ALLOC(n) (void)
+#define GCSPY_NODE_PROMOTED(n) (void)
+#define GCSPY_NODE_TO_COLLECT(n) (void)
+#endif
+
 /* Forwarding Nodes.  These macros mark nodes or children of nodes and
    place them on the forwarding list.  The forwarding list is assumed
    to be in a local variable of the caller named named
@@ -697,6 +735,7 @@ static R_size_t R_NodesInUse = 0;
     CHECK_FOR_FREE_NODE(fn__n__) \
     MARK_NODE(fn__n__); \
     UNSNAP_NODE(fn__n__); \
+    GCSPY_NODE_PROMOTED(fn__n__); \
     SET_NEXT_NODE(fn__n__, forwarded_nodes); \
     forwarded_nodes = fn__n__; \
   } \
@@ -728,6 +767,7 @@ static R_size_t R_NodesInUse = 0;
   } \
   R_GenHeap[c].Free = NEXT_NODE(__n__); \
   R_NodesInUse++; \
+  GCSPY_NODE_ALLOC(__n__); \
   (s) = __n__; \
 } while (0)
 
@@ -849,6 +889,288 @@ static void DEBUG_RELEASE_PRINT(int rel_pages, int maxrel_pages, int i)
 #define INIT_REFCNT(x) do {} while (0)
 #endif
 
+
+
+#ifdef ENABLE_GCSPY
+
+
+#include <pthread.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stddef.h>
+
+#include <gcspy/gcspy_main_server.h>
+#include <gcspy/gcspy_timer.h>
+#include <gcspy/gcspy_utils.h>
+#include <gcspy/gcspy_d_utils.h>
+
+#define GCSPY_TILE_EXTENT 20
+#define GCSPY_PAGE_SIZE   (R_PAGE_SIZE - sizeof(PAGE_HEADER))
+
+#include <gcspy/gcspy_gc_stream.h>
+
+#define MS_USED_SPACE_STREAM    0
+#define MS_YOUNG_STREAM         1
+#define MS_OLD_STREAM           2
+
+msDriverSend (gcspy_gc_driver_t * driver,
+              int gc_class,
+              unsigned event,
+              int gens_collected) {
+  int i;
+  double perc;
+  char tmp[128];
+  int size;
+
+  int numTiles = ceil(R_GenHeap[gc_class].PageCount/(double)GCSPY_TILE_EXTENT);
+
+  gcspy_driverResize(driver, numTiles);
+  gcspy_driverStartComm(driver);
+
+
+  gcspy_driverStream(driver,
+                     MS_USED_SPACE_STREAM,
+                     numTiles);
+
+  PAGE_HEADER * page = R_GenHeap[gc_class].pages;
+  while (page != NULL) {
+    int usedSpace  = 0;
+    for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
+      usedSpace += page->num_alloc * NODE_SIZE(gc_class);
+      for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+        usedSpace += page->num_old[g] * NODE_SIZE(gc_class);
+      }
+      page = page->next;
+      if (page == NULL) break;
+    }
+    if (usedSpace > GCSPY_TILE_EXTENT * GCSPY_PAGE_SIZE) {
+      __asm("int3");
+    }
+    gcspy_driverStreamIntValue(driver, usedSpace);
+  }
+  gcspy_driverStreamEnd(driver);
+
+  gcspy_driverSummary(driver, MS_USED_SPACE_STREAM, 2);
+  gcspy_driverSummaryValue(driver, R_GenHeap[gc_class].AllocCount *
+                                   NODE_SIZE(gc_class));
+  gcspy_driverSummaryValue(driver, R_GenHeap[gc_class].PageCount *
+                                   (R_PAGE_SIZE - sizeof(PAGE_HEADER)));
+  gcspy_driverSummaryEnd(driver);
+
+
+  gcspy_driverStream(driver,
+                     MS_YOUNG_STREAM,
+                     numTiles);
+  page = R_GenHeap[gc_class].pages;
+  while (page != NULL) {
+    int usedSpace  = 0;
+    for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
+      usedSpace += page->num_alloc * NODE_SIZE(gc_class);
+      page->num_alloc = 0;
+      page = page->next;
+      if (page == NULL) break;
+    }
+    gcspy_driverStreamIntValue(driver, usedSpace);
+  }
+  gcspy_driverStreamEnd(driver);
+
+
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    gcspy_driverStream(driver,
+                       MS_OLD_STREAM + g,
+                       numTiles);
+
+    page = R_GenHeap[gc_class].pages;
+    while (page != NULL) {
+      int usedSpace  = 0;
+      for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
+        usedSpace += page->num_old[g] * NODE_SIZE(gc_class);
+        page = page->next;
+        if (page == NULL) break;
+      }
+      gcspy_driverStreamIntValue(driver, usedSpace);
+    }
+    gcspy_driverStreamEnd(driver);
+  }
+
+
+
+  gcspy_driverSpaceInfo(driver, "");
+  gcspy_driverEndComm(driver);
+}
+
+vspaceDriverSend (gcspy_gc_driver_t * driver,
+                  unsigned event,
+                  int gens_collected) {
+  double perc;
+  char tmp[128];
+  int size;
+
+  long   numObjects = R_GenHeap[LARGE_NODE_CLASS].AllocCount;
+
+  gcspy_driverResize(driver, numObjects);
+  gcspy_driverStartComm(driver);
+
+  gcspy_driverStream(driver, MS_USED_SPACE_STREAM, numObjects);
+
+  long generationSeparation[NUM_OLD_GENERATIONS];
+  long found = 0;
+
+  SEXP obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].New);
+  while (obj != R_GenHeap[LARGE_NODE_CLASS].New) {
+    found++;
+    gcspy_driverStreamIntValue(driver, LENGTH(obj) * sizeof(VECREC));
+    obj = NEXT_NODE(obj);
+  }
+
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    generationSeparation[g] = found;
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].Old[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].Old[g]) {
+      found++;
+      gcspy_driverStreamIntValue(driver, LENGTH(obj) * sizeof(VECREC));
+      obj = NEXT_NODE(obj);
+    }
+
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]) {
+      found++;
+      gcspy_driverStreamIntValue(driver, LENGTH(obj) * sizeof(VECREC));
+      obj = NEXT_NODE(obj);
+    }
+  }
+  if (found != numObjects) {
+    __asm("int3");
+  }
+  gcspy_driverStreamEnd(driver);
+
+  gcspy_driverControl(driver);
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    gcspy_driverControlValues(driver,
+                              GCSPY_GC_DRIVER_CONTROL_SEPARATOR,
+                              generationSeparation[g],
+                              1);
+  }
+  gcspy_driverControlEnd(driver);
+
+  gcspy_driverSummary(driver, MS_USED_SPACE_STREAM, 1);
+  gcspy_driverSummaryValue(driver, R_LargeVallocSize);
+  gcspy_driverSummaryEnd(driver);
+
+  gcspy_driverEndComm(driver);
+}
+
+void
+msDriverInit (gcspy_gc_driver_t *gcDriver,
+              int gc_class,
+	      const char *name,
+	      unsigned blockSize) {
+  int i;
+  gcspy_gc_stream_t *stream;
+
+  char * blk_inf = malloc(30);
+  if (blk_inf) sprintf(blk_inf, "(%d Pages)\n", GCSPY_TILE_EXTENT);
+  gcspy_driverInit(gcDriver, -1, name, "threadmill",
+                   "Block ", blk_inf, 0, NULL, 0);
+
+
+  stream = gcspy_driverAddStream(gcDriver, MS_USED_SPACE_STREAM);
+  gcspy_streamInit(stream, MS_USED_SPACE_STREAM,
+		   GCSPY_GC_STREAM_INT_TYPE,
+		   "Used Space",
+		   0, blockSize,
+		   0, 0,
+		   "Used Space: ", " bytes",
+		   GCSPY_GC_STREAM_PRESENTATION_PERCENT,
+		   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
+		   gcspy_colorDBGetColorWithName("Red"));
+
+  stream = gcspy_driverAddStream(gcDriver, MS_YOUNG_STREAM);
+  gcspy_streamInit(stream, MS_YOUNG_STREAM,
+		   GCSPY_GC_STREAM_INT_TYPE,
+		   "Young Objects",
+		   0, blockSize,
+		   0, 0,
+		   "Young Objects: ", " bytes",
+		   GCSPY_GC_STREAM_PRESENTATION_PERCENT,
+		   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
+		   gcspy_colorDBGetColorWithName("Red"));
+
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    stream = gcspy_driverAddStream(gcDriver, MS_OLD_STREAM + g);
+    char * buf = malloc(30);
+    char * buf2 = malloc(30);
+    if (buf)  sprintf(buf,  "Generation %d", g + 1);
+    if (buf2) sprintf(buf2, "Generation %d: ", g + 1);
+    gcspy_streamInit(stream, MS_OLD_STREAM + g,
+          	   GCSPY_GC_STREAM_INT_TYPE,
+          	   buf,
+          	   0, blockSize,
+          	   0, 0,
+          	   buf2, " bytes",
+          	   GCSPY_GC_STREAM_PRESENTATION_PERCENT,
+          	   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
+          	   gcspy_colorDBGetColorWithName("Red"));
+  }
+}
+
+void vspaceDriverInit (gcspy_gc_driver_t *gcDriver,
+                       const char *name,
+                       unsigned blockSize) {
+  int i;
+  gcspy_gc_stream_t *stream;
+
+  gcspy_driverInit(gcDriver, -1, name, "",
+                   "Object ", "", 0, NULL, 0);
+
+
+  stream = gcspy_driverAddStream(gcDriver, MS_USED_SPACE_STREAM);
+  gcspy_streamInit(stream, MS_USED_SPACE_STREAM,
+		   GCSPY_GC_STREAM_INT_TYPE,
+		   "Size",
+		   0, blockSize,
+		   0, 0,
+		   "Size: ", " bytes",
+                   GCSPY_GC_STREAM_PRESENTATION_PLUS,
+                   GCSPY_GC_STREAM_PAINT_STYLE_PLAIN, 0,
+                   gcspy_colorDBGetColorWithName("Red"));
+}
+
+
+
+#define GCSPY_EVENT_GC 3
+
+static gcspy_main_server_t server;
+static gcspy_gc_driver_t * gcspy_driver[NUM_SMALL_NODE_CLASSES];
+static gcspy_gc_driver_t * gcspy_driver_vspace;
+
+
+void gcspy_sendData(int event, int gens_collected) {
+    if (R_GCSpy) {
+        if (gcspy_mainServerIsConnected(&server, event)) {
+            //printf("Starting to send event %d\n", event);
+            int i; for (i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
+              if (gcspy_mainServerIsConnected(&server, event)) {
+                  msDriverSend(gcspy_driver[i], i, event, gens_collected);
+              }
+            }
+            vspaceDriverSend(gcspy_driver_vspace, event, gens_collected);
+            //printf("Sent event %d\n", event);
+        }
+        gcspy_mainServerSafepoint(&server, event);
+    }
+}
+
+PAGE_HEADER * getPage(SEXP s) {
+  return (PAGE_HEADER*)((uintptr_t)s & ~(R_PAGE_ALIGNED-1L));
+}
+
+#endif
+
+
+
+
+
 /* Page Allocation and Release. */
 
 static void GetNewPage(int node_class)
@@ -861,7 +1183,21 @@ static void GetNewPage(int node_class)
     node_size = NODE_SIZE(node_class);
     page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
 
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+      page = NULL;
+      posix_memalign(&page, R_PAGE_ALIGNED, R_PAGE_SIZE);
+      if (page != NULL) {
+        if ((uintptr_t)page & ~(R_PAGE_ALIGNED-1L) != page) {
+          page = ((uintptr_t)page + R_PAGE_ALIGNED) & ~(R_PAGE_ALIGNED-1L);
+        }
+      }
+    } else {
+      page = malloc(R_PAGE_SIZE);
+    }
+#else
     page = malloc(R_PAGE_SIZE);
+#endif
     if (page == NULL) {
 	R_gc_full(0);
 	page = malloc(R_PAGE_SIZE);
@@ -871,6 +1207,17 @@ static void GetNewPage(int node_class)
 #ifdef R_MEMORY_PROFILING
     R_ReportNewPage();
 #endif
+
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+      page->number = R_GenHeap[node_class].PageCount - 1;
+      page->num_alloc = 0;
+      for (int g = 0; g < NUM_OLD_GENERATIONS; ++g) {
+        page->num_old[g] = 0;
+      }
+    }
+#endif
+
     page->next = R_GenHeap[node_class].pages;
     R_GenHeap[node_class].pages = page;
     R_GenHeap[node_class].PageCount++;
@@ -901,6 +1248,16 @@ static void ReleasePage(PAGE_HEADER *page, int node_class)
     SEXP s;
     char *data;
     int node_size, page_count, i;
+
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+      PAGE_HEADER * next = R_GenHeap[node_class].pages;
+      while (next != page) {
+        next->number--;
+        next = next->next;
+      }
+    }
+#endif
 
     node_size = NODE_SIZE(node_class);
     page_count = (R_PAGE_SIZE - sizeof(PAGE_HEADER)) / node_size;
@@ -1100,11 +1457,14 @@ static void AdjustHeapSize(R_size_t size_needed)
   SEXP an__n__ = (s); \
   int an__g__ = (g); \
   if (an__n__ && NODE_GEN_IS_YOUNGER(an__n__, an__g__)) { \
-    if (NODE_IS_MARKED(an__n__)) \
+    if (NODE_IS_MARKED(an__n__)) { \
        R_GenHeap[NODE_CLASS(an__n__)].OldCount[NODE_GENERATION(an__n__)]--; \
-    else \
+       GCSPY_NODE_TO_COLLECT(an__n__); \
+    } else { \
       MARK_NODE(an__n__); \
+    } \
     SET_NODE_GENERATION(an__n__, an__g__); \
+    GCSPY_NODE_PROMOTED(an__n__); \
     UNSNAP_NODE(an__n__); \
     SET_NEXT_NODE(an__n__, forwarded_nodes); \
     forwarded_nodes = an__n__; \
@@ -1524,6 +1884,13 @@ static void RunGenCollect(R_size_t size_needed)
 #endif
 
  again:
+
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+      gcspy_sendData(GCSPY_EVENT_GC, 0);
+    }
+#endif
+
     gens_collected = num_old_gens_to_collect;
 
 #ifndef EXPEL_OLD_TO_NEW
@@ -1555,6 +1922,7 @@ static void RunGenCollect(R_size_t size_needed)
 	    s = NEXT_NODE(R_GenHeap[i].Old[gen]);
 	    while (s != R_GenHeap[i].Old[gen]) {
 		SEXP next = NEXT_NODE(s);
+                GCSPY_NODE_TO_COLLECT(s);
 		if (gen < NUM_OLD_GENERATIONS - 1)
 		    SET_NODE_GENERATION(s, gen + 1);
 		UNMARK_NODE(s);
@@ -1786,6 +2154,12 @@ static void RunGenCollect(R_size_t size_needed)
     }
     R_NodesInUse = R_NSize - R_Collected;
 
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+      gcspy_sendData(gens_collected, gens_collected);
+    }
+#endif
+
     if (num_old_gens_to_collect < NUM_OLD_GENERATIONS) {
 	if (R_Collected < R_MinFreeFrac * R_NSize ||
 	    VHEAP_FREE() < size_needed + R_MinFreeFrac * R_VSize) {
@@ -1821,6 +2195,7 @@ static void RunGenCollect(R_size_t size_needed)
 	REprintf(" (level %d) ... ", gens_collected);
 	DEBUG_GC_SUMMARY(gens_collected == NUM_OLD_GENERATIONS);
     }
+
 }
 
 /* public interface for controlling GC torture settings */
@@ -1992,10 +2367,50 @@ static void NORET mem_err_malloc(R_size_t size)
 #define PP_REDZONE_SIZE 1000L
 static int R_StandardPPStackSize, R_RealPPStackSize;
 
+#ifdef ENABLE_GCSPY
+static void * gcSpyLoop (void *arg) {
+  gcspy_mainServerMainLoop(&server);
+}
+
+#endif
+
 void attribute_hidden InitMemory()
 {
     int i;
     int gen;
+
+#ifdef ENABLE_GCSPY
+    if (R_GCSpy) {
+        pthread_t tid;
+        gcspy_mainServerInit(&server, 3000, GCSPY_PAGE_SIZE * 1024, "R GCSpy Server", 1);
+        gcspy_mainServerSetGeneralInfo(&server, "just a test so far");
+        gcspy_mainServerAddEvent(&server, 0, "Minor GC");
+        gcspy_mainServerAddEvent(&server, 1, "GC Gen 1");
+        gcspy_mainServerAddEvent(&server, 2, "GC Gen 2");
+        gcspy_mainServerAddEvent(&server, GCSPY_EVENT_GC, "GC Triggered");
+        for (int i = 0; i < NUM_SMALL_NODE_CLASSES; i++) {
+          gcspy_driver[i] = gcspy_mainServerAddDriver(&server);
+          char name[30];
+          sprintf(name, "Size Class %d", i);
+          msDriverInit(gcspy_driver[i],
+                       i,
+                       name,
+                       GCSPY_TILE_EXTENT * GCSPY_PAGE_SIZE);
+        }
+        gcspy_driver_vspace = gcspy_mainServerAddDriver(&server);
+        vspaceDriverInit(gcspy_driver_vspace,
+                         "Variable Sized Objects",
+                         GCSPY_TILE_EXTENT * GCSPY_PAGE_SIZE);
+
+        if (pthread_create(&tid, NULL, gcSpyLoop, NULL)) {
+            printf("Couldn't create thread.\n");
+            exit(-1);
+        }
+        while (!gcspy_mainServerIsConnected(&server, 0)) {
+          gcspy_wait(1000);
+        }
+    }
+#endif
 
     init_gctorture();
     init_gc_grow_settings();
@@ -2093,6 +2508,7 @@ void attribute_hidden InitMemory()
     R_LogicalNAValue = allocVector(LGLSXP, 1);
     LOGICAL(R_LogicalNAValue)[0] = NA_LOGICAL;
     MARK_NOT_MUTABLE(R_LogicalNAValue);
+
 }
 
 /* Since memory allocated from the heap is non-moving, R_alloc just

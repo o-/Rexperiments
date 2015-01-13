@@ -241,9 +241,9 @@ void attribute_hidden InitOptions(void)
     char *p;
 
 #ifdef HAVE_RL_COMPLETION_MATCHES
-    PROTECT(v = val = allocList(17));
+    PROTECT(v = val = allocList(18));
 #else
-    PROTECT(v = val = allocList(16));
+    PROTECT(v = val = allocList(17));
 #endif
 
     SET_TAG(v, install("prompt"));
@@ -276,6 +276,10 @@ void attribute_hidden InitOptions(void)
 
     SET_TAG(v, install("verbose"));
     SETCAR(v, ScalarLogical(R_Verbose));
+    v = CDR(v);
+
+    SET_TAG(v, install("gcspy"));
+    SETCAR(v, ScalarLogical(R_GCSpy));
     v = CDR(v);
 
     SET_TAG(v, install("check.bounds"));

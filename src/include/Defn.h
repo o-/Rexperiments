@@ -682,6 +682,7 @@ LibExtern Rboolean R_Interactive INI_as(TRUE);	/* TRUE during interactive use*/
 extern0 Rboolean R_Quiet	INI_as(FALSE);	/* Be as quiet as possible */
 extern Rboolean  R_Slave	INI_as(FALSE);	/* Run as a slave process */
 extern0 Rboolean R_Verbose	INI_as(FALSE);	/* Be verbose */
+extern0 Rboolean R_GCSpy	INI_as(FALSE);	/* Enable GCSpy server */
 /* extern int	R_Console; */	    /* Console active flag */
 /* IoBuffer R_ConsoleIob; : --> ./IOStuff.h */
 /* R_Consolefile is used in the internet module */

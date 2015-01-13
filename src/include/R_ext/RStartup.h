@@ -62,6 +62,7 @@ typedef struct
     Rboolean R_Slave;
     Rboolean R_Interactive;
     Rboolean R_Verbose;
+    Rboolean R_GCSpy;
     Rboolean LoadSiteFile;
     Rboolean LoadInitFile;
     Rboolean DebugInitFile;
