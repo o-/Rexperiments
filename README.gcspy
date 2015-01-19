@@ -1,0 +1,40 @@
+GCspy support for R
+~~~~~~~~~~~~~~~~~~~
+
+1) Get and build gcspy from http://www.cs.kent.ac.uk/projects/gc/GcSpy
+
+2) Build R with lib gcspy:
+
+# export GCSPY_ROOT=/some/path
+# export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GCSPY_ROOT/src/src/c/lib
+# ./configure
+# make R_XTRA_LIBS="-lgcspy -lpthread -L$GCSPY_ROOT/src/src/c/lib" R_XTRA_CFLAGS="-I$GCSPY_ROOT/src/src/c/include -DENABLE_GCSPY"
+
+or to statically link libgcspy:
+
+# make R_XTRA_LIBS="-lpthread $GCSPY_ROOT/src/src/c/lib/libgcspy.so" R_XTRA_CFLAGS="-I$GCSPY_ROOT/src/src/c/include -DENABLE_GCSPY"
+
+3) Run './bin/R --gc-spy'
+
+4) Connect with gcspy client to localhost:3000
+
+
+Understanding the Visualization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For every small size class a continuous space is rendered, where
+one block represents at least one page (Note that in reality pages
+are not not adjacent in memory, but in a linked list).
+
+The bottom space shows variably sized objects, every object is
+rendered as one block, the most red objects are as big as one block
+in the other spaces, [+] objects are bigger.
+
+
+Configuration
+~~~~~~~~~~~~~
+
+in src/main/memory.c:
+
+GCSPY_TILE_EXTENT       : How many pages per block
+GCSPY_LOOKUP_TABLE_SIZE : Increase if it overflows
