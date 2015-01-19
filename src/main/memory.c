@@ -27,7 +27,6 @@
  *	and reset the stack pointer.
  */
 
-#define ENABLE_GCSPY
 #define USE_RINTERNALS
 
 #include <stdarg.h>
@@ -529,7 +528,7 @@ struct PAGE_HEADER {
   ((c) == 0 ? sizeof(SEXPREC) : \
    sizeof(SEXPREC_ALIGN) + NodeClassSize[c] * sizeof(VECREC))
 
-#define PAGE_DATA(p) ((uintptr_t)p + sizeof(PAGE_HEADER))
+#define PAGE_DATA(p) ((void*)((PAGE_HEADER*)p + 1))
 #define VHEAP_FREE() (R_VSize - R_LargeVallocSize - R_SmallVallocSize)
 
 
@@ -719,9 +718,9 @@ void GCSPY_NODE_TO_COLLECT(SEXP s) {
 }
 
 #else
-#define GCSPY_NODE_ALLOC(n) (void)
-#define GCSPY_NODE_PROMOTED(n) (void)
-#define GCSPY_NODE_TO_COLLECT(n) (void)
+#define GCSPY_NODE_ALLOC(n) (n)
+#define GCSPY_NODE_PROMOTED(n) (n)
+#define GCSPY_NODE_TO_COLLECT(n) (n)
 #endif
 
 /* Forwarding Nodes.  These macros mark nodes or children of nodes and
@@ -893,23 +892,22 @@ static void DEBUG_RELEASE_PRINT(int rel_pages, int maxrel_pages, int i)
 
 #ifdef ENABLE_GCSPY
 
-
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
 
-#include <gcspy/gcspy_main_server.h>
-#include <gcspy/gcspy_timer.h>
-#include <gcspy/gcspy_utils.h>
-#include <gcspy/gcspy_d_utils.h>
+#include <gcspy_main_server.h>
+#include <gcspy_timer.h>
+#include <gcspy_utils.h>
+#include <gcspy_d_utils.h>
 
 #define GCSPY_TILE_EXTENT 1
 #define GCSPY_PAGE_SIZE   (R_PAGE_SIZE - sizeof(PAGE_HEADER))
 #define GCSPY_PAGE_BITS 10
 #define GCSPY_LOOKUP_TABLE_SIZE (1<<20)
 
-#include <gcspy/gcspy_gc_stream.h>
+#include <gcspy_gc_stream.h>
 
 #define MS_USED_SPACE_STREAM    0
 #define MS_YOUNG_STREAM         1
@@ -948,7 +946,7 @@ PAGE_HEADER * getPage(void * ptr) {
     candidate--;
   }
 
-//  __asm("int3");
+  __asm("int3");
   return NULL;
 }
 
@@ -1038,9 +1036,9 @@ void msDriverSend (gcspy_gc_driver_t * driver,
   gcspy_driverEndComm(driver);
 }
 
-vspaceDriverSend (gcspy_gc_driver_t * driver,
-                  unsigned event,
-                  int gens_collected) {
+void vspaceDriverSend (gcspy_gc_driver_t * driver,
+                       unsigned event,
+                       int gens_collected) {
   double perc;
   char tmp[128];
   int size;
@@ -1233,6 +1231,10 @@ static void GetNewPage(int node_class)
       // Fill in the page lookup table
       PAGE_HEADER ** lookup = getPageLookup(page);
       // printf("* Registered a new page %p, with offset %d\n", page, lookup - page_lookup_table);
+      if (*lookup != NULL) {
+        puts("Page lookup table overflow");
+        __asm("int3");
+      }
       *lookup = page;
       page->number = R_GenHeap[node_class].PageCount - 1;
       page->num_alloc = 0;
@@ -1329,17 +1331,16 @@ static void TryToReleasePages(void)
 		     j++, data += node_size) {
 		    s = (SEXP) data;
 		    if (NODE_IS_MARKED(s)) {
-                    if (R_GCSpy && page->num_alloc + page->num_old[0] + page->num_old[1] == 0) {
-                      __asm("int3");
-                    }
 			in_use = 1;
 			break;
 		    }
 		}
 		if (! in_use) {
-                    if (R_GCSpy && page->num_alloc + page->num_old[0] + page->num_old[1] > 0) {
-                      __asm("int3");
-                    }
+#ifdef ENABLE_GCSPY
+                    if (R_GCSpy)
+                      if (R_GCSpy && page->num_alloc + page->num_old[0] +
+                          page->num_old[1] > 0) __asm("int3");
+#endif
 		    ReleasePage(page, i);
 		    if (last == NULL)
 			R_GenHeap[i].pages = next;
@@ -1347,11 +1348,12 @@ static void TryToReleasePages(void)
 			last->next = next;
 		    pages_free++;
 		    rel_pages++;
-		}
-		else {
-                    if (R_GCSpy && page->num_alloc + page->num_old[0] + page->num_old[1] == 0) {
-                      __asm("int3");
-                    }
+		} else {
+#ifdef ENABLE_GCSPY
+                      if (R_GCSpy)
+                        if (R_GCSpy && page->num_alloc + page->num_old[0] +
+                            page->num_old[1] == 0) __asm("int3");
+#endif
                   last = page;
                 }
 		page = next;
@@ -2422,8 +2424,9 @@ void attribute_hidden InitMemory()
           puts("GCSPY_PAGE_BITS is set too big");
           __asm("int3");
         }
-        page_lookup_table = malloc(GCSPY_LOOKUP_TABLE_SIZE *
-                                   sizeof(PAGE_HEADER*));
+        long lk_sz = GCSPY_LOOKUP_TABLE_SIZE * sizeof(PAGE_HEADER*);
+        page_lookup_table = malloc(lk_sz);
+        memset(page_lookup_table, 0, lk_sz);
         pthread_t tid;
         gcspy_mainServerInit(&server, 3000, GCSPY_PAGE_SIZE * 1024, "R GCSpy Server", 1);
         gcspy_mainServerSetGeneralInfo(&server, "just a test so far");
