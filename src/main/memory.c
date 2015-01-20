@@ -502,16 +502,16 @@ static int gen_gc_counts[NUM_OLD_GENERATIONS + 1];
 static int collect_counts[NUM_OLD_GENERATIONS];
 
 #ifdef ENABLE_GCSPY
-#define NUM_OBJECT_TYPES 8
-char * object_types[] = {"Vector", "Internal", "String", "Expression",
-                         "Generic Vector", "Env", "List", "Bytecode"};
+#define NUM_OBJECT_TYPES 10
+char * object_types[] = {"Other Vector", "Internal", "String",
+                         "Env", "List", "Bytecode",
+                         "Int Vector", "Double Vector", "Symbol", "Raw"};
 
 int objectType(SEXP s) {
   switch (TYPEOF(s)) {
   case LGLSXP:
-  case INTSXP:
-  case REALSXP:
   case CPLXSXP:
+  case VECSXP:
     return 0;
   case NILSXP:
   case CLOSXP:
@@ -521,24 +521,27 @@ int objectType(SEXP s) {
   case BUILTINSXP:
   case WEAKREFSXP:
   case EXTPTRSXP:
-  case RAWSXP:
   case S4SXP:
+  case EXPRSXP:
     return 1;
   case STRSXP:
-  case SYMSXP:
   case CHARSXP:
     return 2;
-  case EXPRSXP:
-    return 3;
-  case VECSXP:
-    return 4;
   case ENVSXP:
-    return 5;
+    return 3;
   case LISTSXP:
   case DOTSXP:
-    return 6;
+    return 4;
   case BCODESXP:
+    return 5;
+  case INTSXP:
+    return 6;
+  case REALSXP:
     return 7;
+  case SYMSXP:
+    return 8;
+  case RAWSXP:
+    return 9;
   }
   __asm("int3");
 }
@@ -1319,11 +1322,6 @@ void vspaceDriverInit (gcspy_gc_driver_t *gcDriver,
 
   for (int ot = 0; ot < NUM_OBJECT_TYPES; ot++) {
     gcspy_streamAddEnumName(stream, ot, object_types[ot]);
-  }
-
-  // No clue what is going on there:
-  for (int ot = NUM_OBJECT_TYPES; ot < 10; ot++) {
-    gcspy_streamAddEnumName(stream, ot, "");
   }
 }
 
