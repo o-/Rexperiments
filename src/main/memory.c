@@ -1059,7 +1059,7 @@ void msDriverSend (gcspy_gc_driver_t * driver,
         if (page == NULL) break;
       }
       if (usedSpace > page_count) __asm("int3");
-      gcspy_driverStreamIntValue(driver, usedSpace);
+      gcspy_driverStreamShortValue(driver, usedSpace);
     }
     gcspy_driverStreamEnd(driver);
   }
@@ -1076,7 +1076,7 @@ void msDriverSend (gcspy_gc_driver_t * driver,
       if (page == NULL) break;
     }
     if (usedSpace > page_count) __asm("int3");
-    gcspy_driverStreamIntValue(driver, usedSpace);
+    gcspy_driverStreamShortValue(driver, usedSpace);
   }
   gcspy_driverStreamEnd(driver);
 
@@ -1093,7 +1093,7 @@ void msDriverSend (gcspy_gc_driver_t * driver,
         if (page == NULL) break;
       }
       if (usedSpace > page_count) __asm("int3");
-      gcspy_driverStreamIntValue(driver, usedSpace);
+      gcspy_driverStreamShortValue(driver, usedSpace);
     }
     gcspy_driverStreamEnd(driver);
   }
@@ -1249,7 +1249,7 @@ void msDriverInit (gcspy_gc_driver_t *gcDriver,
     char * buf = malloc(30);
     sprintf(buf, "# %s: ", object_types[ot]);
     gcspy_streamInit(stream, stream_number,
-                     GCSPY_GC_STREAM_INT_TYPE,
+                     GCSPY_GC_STREAM_SHORT_TYPE,
                      object_types[ot], 0, page_count, 0, 0, buf, "",
                      GCSPY_GC_STREAM_PRESENTATION_PERCENT,
                      GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
@@ -1258,7 +1258,7 @@ void msDriverInit (gcspy_gc_driver_t *gcDriver,
 
   stream = gcspy_driverAddStream(gcDriver, stream_number++);
   gcspy_streamInit(stream, stream_number,
-		   GCSPY_GC_STREAM_INT_TYPE,
+		   GCSPY_GC_STREAM_SHORT_TYPE,
 		   "Young Objects",
 		   0, page_count,
 		   0, 0,
@@ -1274,7 +1274,7 @@ void msDriverInit (gcspy_gc_driver_t *gcDriver,
     if (buf)  sprintf(buf,  "Generation %d", g + 1);
     if (buf2) sprintf(buf2, "Generation %d: ", g + 1);
     gcspy_streamInit(stream, stream_number,
-          	   GCSPY_GC_STREAM_INT_TYPE,
+          	   GCSPY_GC_STREAM_SHORT_TYPE,
           	   buf,
           	   0, page_count,
           	   0, 0,
