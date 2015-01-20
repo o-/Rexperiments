@@ -1229,7 +1229,7 @@ void msDriverInit (gcspy_gc_driver_t *gcDriver,
 
   char * blk_inf = malloc(30);
   if (blk_inf) sprintf(blk_inf, "(%d Pages)\n", GCSPY_TILE_EXTENT);
-  gcspy_driverInit(gcDriver, -1, name, "threadmill",
+  gcspy_driverInit(gcDriver, -1, name, "treadmill",
                    "Block ", blk_inf, 0, NULL, 0);
 
 
