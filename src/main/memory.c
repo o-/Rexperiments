@@ -501,6 +501,50 @@ static int num_old_gens_to_collect = 0;
 static int gen_gc_counts[NUM_OLD_GENERATIONS + 1];
 static int collect_counts[NUM_OLD_GENERATIONS];
 
+#ifdef ENABLE_GCSPY
+#define NUM_OBJECT_TYPES 8
+char * object_types[] = {"Vector", "Internal", "String", "Expression",
+                         "Generic Vector", "Env", "List", "Bytecode"};
+
+int objectType(SEXP s) {
+  switch (TYPEOF(s)) {
+  case LGLSXP:
+  case INTSXP:
+  case REALSXP:
+  case CPLXSXP:
+    return 0;
+  case NILSXP:
+  case CLOSXP:
+  case PROMSXP:
+  case LANGSXP:
+  case SPECIALSXP:
+  case BUILTINSXP:
+  case WEAKREFSXP:
+  case EXTPTRSXP:
+  case RAWSXP:
+  case S4SXP:
+    return 1;
+  case STRSXP:
+  case SYMSXP:
+  case CHARSXP:
+    return 2;
+  case EXPRSXP:
+    return 3;
+  case VECSXP:
+    return 4;
+  case ENVSXP:
+    return 5;
+  case LISTSXP:
+  case DOTSXP:
+    return 6;
+  case BCODESXP:
+    return 7;
+  }
+  __asm("int3");
+}
+
+
+#endif
 
 /* Node Pages.  Non-vector nodes and small vector nodes are allocated
    from fixed size pages.  The pages for each node class are kept in a
@@ -515,7 +559,9 @@ struct PAGE_HEADER {
 #ifdef ENABLE_GCSPY
   unsigned int number;
   unsigned int num_alloc;
+  unsigned int num_alloc_t[NUM_OBJECT_TYPES];
   unsigned int num_old[NUM_OLD_GENERATIONS];
+  unsigned int num_old_t[NUM_OLD_GENERATIONS][NUM_OBJECT_TYPES];
 #endif
 };
 
@@ -698,13 +744,18 @@ static R_size_t R_NodesInUse = 0;
 PAGE_HEADER * getPage(void * s);
 
 void GCSPY_NODE_ALLOC(SEXP s) {
-  if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES)
-    getPage(s)->num_alloc++;
+  if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES) {
+    PAGE_HEADER * p = getPage(s);
+    p->num_alloc++;
+    p->num_alloc_t[objectType(s)]++;
+  }
 }
 
 void GCSPY_NODE_PROMOTED(SEXP s) {
   if (R_GCSpy && NODE_CLASS(s) < NUM_SMALL_NODE_CLASSES) {
-    getPage(s)->num_old[NODE_GENERATION(s)]++;
+    PAGE_HEADER * p = getPage(s);
+    p->num_old[NODE_GENERATION(s)]++;
+    p->num_old_t[NODE_GENERATION(s)][objectType(s)]++;
   }
 }
 
@@ -713,7 +764,9 @@ void GCSPY_NODE_TO_COLLECT(SEXP s) {
     if (getPage(s)->num_old[NODE_GENERATION(s)] == 0) {
       __asm("int3");
     }
-    getPage(s)->num_old[NODE_GENERATION(s)]--;
+    PAGE_HEADER * p = getPage(s);
+    p->num_old[NODE_GENERATION(s)]--;
+    p->num_old_t[NODE_GENERATION(s)][objectType(s)]--;
   }
 }
 
@@ -902,16 +955,12 @@ static void DEBUG_RELEASE_PRINT(int rel_pages, int maxrel_pages, int i)
 #include <gcspy_utils.h>
 #include <gcspy_d_utils.h>
 
-#define GCSPY_TILE_EXTENT 1
+#define GCSPY_TILE_EXTENT 20
 #define GCSPY_PAGE_SIZE   (R_PAGE_SIZE - sizeof(PAGE_HEADER))
 #define GCSPY_PAGE_BITS 10
 #define GCSPY_LOOKUP_TABLE_SIZE (1<<20)
 
 #include <gcspy_gc_stream.h>
-
-#define MS_USED_SPACE_STREAM    0
-#define MS_YOUNG_STREAM         1
-#define MS_OLD_STREAM           2
 
 PAGE_HEADER ** page_lookup_table;
 
@@ -960,14 +1009,15 @@ void msDriverSend (gcspy_gc_driver_t * driver,
   int size;
 
   int numTiles = ceil(R_GenHeap[gc_class].PageCount/(double)GCSPY_TILE_EXTENT);
+  int driver_number = 0;
+
+  int page_count = GCSPY_TILE_EXTENT *
+    ((R_PAGE_SIZE - sizeof(PAGE_HEADER)) / NODE_SIZE(gc_class));
 
   gcspy_driverResize(driver, numTiles);
   gcspy_driverStartComm(driver);
 
-
-  gcspy_driverStream(driver,
-                     MS_USED_SPACE_STREAM,
-                     numTiles);
+  gcspy_driverStream(driver, driver_number++, numTiles);
 
   PAGE_HEADER * page = R_GenHeap[gc_class].pages;
   while (page != NULL) {
@@ -987,49 +1037,66 @@ void msDriverSend (gcspy_gc_driver_t * driver,
   }
   gcspy_driverStreamEnd(driver);
 
-  gcspy_driverSummary(driver, MS_USED_SPACE_STREAM, 2);
+  gcspy_driverSummary(driver, driver_number, 2);
   gcspy_driverSummaryValue(driver, R_GenHeap[gc_class].AllocCount *
                                    NODE_SIZE(gc_class));
   gcspy_driverSummaryValue(driver, R_GenHeap[gc_class].PageCount *
                                    (R_PAGE_SIZE - sizeof(PAGE_HEADER)));
   gcspy_driverSummaryEnd(driver);
 
+  for (int ot = 0; ot < NUM_OBJECT_TYPES; ot++) {
+    gcspy_driverStream(driver, driver_number++, numTiles);
+    page = R_GenHeap[gc_class].pages;
+    while (page != NULL) {
+      int usedSpace  = 0;
+      for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
+        usedSpace += page->num_alloc_t[ot];
+        page->num_alloc_t[ot] = 0;
+        for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+          usedSpace += page->num_old_t[g][ot];
+        }
+        page = page->next;
+        if (page == NULL) break;
+      }
+      if (usedSpace > page_count) __asm("int3");
+      gcspy_driverStreamIntValue(driver, usedSpace);
+    }
+    gcspy_driverStreamEnd(driver);
+  }
 
-  gcspy_driverStream(driver,
-                     MS_YOUNG_STREAM,
-                     numTiles);
+
+  gcspy_driverStream(driver, driver_number++, numTiles);
   page = R_GenHeap[gc_class].pages;
   while (page != NULL) {
     int usedSpace  = 0;
     for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
-      usedSpace += page->num_alloc * NODE_SIZE(gc_class);
+      usedSpace += page->num_alloc;
       page->num_alloc = 0;
       page = page->next;
       if (page == NULL) break;
     }
+    if (usedSpace > page_count) __asm("int3");
     gcspy_driverStreamIntValue(driver, usedSpace);
   }
   gcspy_driverStreamEnd(driver);
 
 
   for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
-    gcspy_driverStream(driver,
-                       MS_OLD_STREAM + g,
-                       numTiles);
+    gcspy_driverStream(driver, driver_number++, numTiles);
 
     page = R_GenHeap[gc_class].pages;
     while (page != NULL) {
       int usedSpace  = 0;
       for (int t = 0; t < GCSPY_TILE_EXTENT; ++t) {
-        usedSpace += page->num_old[g] * NODE_SIZE(gc_class);
+        usedSpace += page->num_old[g];
         page = page->next;
         if (page == NULL) break;
       }
+      if (usedSpace > page_count) __asm("int3");
       gcspy_driverStreamIntValue(driver, usedSpace);
     }
     gcspy_driverStreamEnd(driver);
   }
-
 
 
   gcspy_driverSpaceInfo(driver, "");
@@ -1046,14 +1113,45 @@ void vspaceDriverSend (gcspy_gc_driver_t * driver,
   long   numObjects = R_GenHeap[LARGE_NODE_CLASS].AllocCount;
 
   gcspy_driverResize(driver, numObjects);
+
+  long found = 0;
+  SEXP obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].New);
+  while (obj != R_GenHeap[LARGE_NODE_CLASS].New) {
+    char _buf[20];
+    sprintf(_buf, " (%p)", obj);
+    gcspy_driverSetTileName(driver, found, _buf);
+    found++;
+    obj = NEXT_NODE(obj);
+  }
+
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].Old[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].Old[g]) {
+      char _buf[20];
+      sprintf(_buf, " (%p)", obj);
+      gcspy_driverSetTileName(driver, found, _buf);
+      found++;
+      obj = NEXT_NODE(obj);
+    }
+
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]) {
+      char _buf[20];
+      sprintf(_buf, " (%p)", obj);
+      gcspy_driverSetTileName(driver, found, _buf);
+      found++;
+      obj = NEXT_NODE(obj);
+    }
+  }
+
+
   gcspy_driverStartComm(driver);
 
-  gcspy_driverStream(driver, MS_USED_SPACE_STREAM, numObjects);
+  gcspy_driverStream(driver, 0, numObjects);
 
   long generationSeparation[NUM_OLD_GENERATIONS];
-  long found = 0;
-
-  SEXP obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].New);
+  found = 0;
+  obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].New);
   while (obj != R_GenHeap[LARGE_NODE_CLASS].New) {
     found++;
     gcspy_driverStreamIntValue(driver, LENGTH(obj) * sizeof(VECREC));
@@ -1090,20 +1188,44 @@ void vspaceDriverSend (gcspy_gc_driver_t * driver,
   }
   gcspy_driverControlEnd(driver);
 
-  gcspy_driverSummary(driver, MS_USED_SPACE_STREAM, 1);
+  gcspy_driverSummary(driver, 0, 1);
   gcspy_driverSummaryValue(driver, R_LargeVallocSize);
   gcspy_driverSummaryEnd(driver);
+
+  gcspy_driverStream(driver, 1, numObjects);
+  obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].New);
+  while (obj != R_GenHeap[LARGE_NODE_CLASS].New) {
+    gcspy_driverStreamByteValue(driver, objectType(obj));
+    obj = NEXT_NODE(obj);
+  }
+  for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].Old[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].Old[g]) {
+      gcspy_driverStreamByteValue(driver, objectType(obj));
+      obj = NEXT_NODE(obj);
+    }
+    obj = NEXT_NODE(R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]);
+    while (obj != R_GenHeap[LARGE_NODE_CLASS].OldToNew[g]) {
+      gcspy_driverStreamByteValue(driver, objectType(obj));
+      obj = NEXT_NODE(obj);
+    }
+  }
+  gcspy_driverStreamEnd(driver);
 
   gcspy_driverEndComm(driver);
 }
 
-void
-msDriverInit (gcspy_gc_driver_t *gcDriver,
-              int gc_class,
-	      const char *name,
-	      unsigned blockSize) {
+void msDriverInit (gcspy_gc_driver_t *gcDriver,
+                   int gc_class,
+                   const char *name,
+                   unsigned blockSize) {
   int i;
   gcspy_gc_stream_t *stream;
+
+  int page_count = GCSPY_TILE_EXTENT *
+    ((R_PAGE_SIZE - sizeof(PAGE_HEADER)) / NODE_SIZE(gc_class));
+
+  int stream_number = 0;
 
   char * blk_inf = malloc(30);
   if (blk_inf) sprintf(blk_inf, "(%d Pages)\n", GCSPY_TILE_EXTENT);
@@ -1111,8 +1233,8 @@ msDriverInit (gcspy_gc_driver_t *gcDriver,
                    "Block ", blk_inf, 0, NULL, 0);
 
 
-  stream = gcspy_driverAddStream(gcDriver, MS_USED_SPACE_STREAM);
-  gcspy_streamInit(stream, MS_USED_SPACE_STREAM,
+  stream = gcspy_driverAddStream(gcDriver, stream_number++);
+  gcspy_streamInit(stream, stream_number,
 		   GCSPY_GC_STREAM_INT_TYPE,
 		   "Used Space",
 		   0, blockSize,
@@ -1122,29 +1244,41 @@ msDriverInit (gcspy_gc_driver_t *gcDriver,
 		   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
 		   gcspy_colorDBGetColorWithName("Red"));
 
-  stream = gcspy_driverAddStream(gcDriver, MS_YOUNG_STREAM);
-  gcspy_streamInit(stream, MS_YOUNG_STREAM,
+  for (int ot = 0; ot < NUM_OBJECT_TYPES; ot++) {
+    stream = gcspy_driverAddStream(gcDriver, stream_number++);
+    char * buf = malloc(30);
+    sprintf(buf, "# %s: ", object_types[ot]);
+    gcspy_streamInit(stream, stream_number,
+                     GCSPY_GC_STREAM_INT_TYPE,
+                     object_types[ot], 0, page_count, 0, 0, buf, "",
+                     GCSPY_GC_STREAM_PRESENTATION_PERCENT,
+                     GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
+                     gcspy_colorDBGetColorWithName("Red"));
+  }
+
+  stream = gcspy_driverAddStream(gcDriver, stream_number++);
+  gcspy_streamInit(stream, stream_number,
 		   GCSPY_GC_STREAM_INT_TYPE,
 		   "Young Objects",
-		   0, blockSize,
+		   0, page_count,
 		   0, 0,
-		   "Young Objects: ", " bytes",
+		   "Young Objects: ", "",
 		   GCSPY_GC_STREAM_PRESENTATION_PERCENT,
 		   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
 		   gcspy_colorDBGetColorWithName("Red"));
 
   for (int g = 0; g < NUM_OLD_GENERATIONS; g++) {
-    stream = gcspy_driverAddStream(gcDriver, MS_OLD_STREAM + g);
+    stream = gcspy_driverAddStream(gcDriver, stream_number++);
     char * buf = malloc(30);
     char * buf2 = malloc(30);
     if (buf)  sprintf(buf,  "Generation %d", g + 1);
     if (buf2) sprintf(buf2, "Generation %d: ", g + 1);
-    gcspy_streamInit(stream, MS_OLD_STREAM + g,
+    gcspy_streamInit(stream, stream_number,
           	   GCSPY_GC_STREAM_INT_TYPE,
           	   buf,
-          	   0, blockSize,
+          	   0, page_count,
           	   0, 0,
-          	   buf2, " bytes",
+          	   buf2, "",
           	   GCSPY_GC_STREAM_PRESENTATION_PERCENT,
           	   GCSPY_GC_STREAM_PAINT_STYLE_ZERO, 0,
           	   gcspy_colorDBGetColorWithName("Red"));
@@ -1161,8 +1295,8 @@ void vspaceDriverInit (gcspy_gc_driver_t *gcDriver,
                    "Object ", "", 0, NULL, 0);
 
 
-  stream = gcspy_driverAddStream(gcDriver, MS_USED_SPACE_STREAM);
-  gcspy_streamInit(stream, MS_USED_SPACE_STREAM,
+  stream = gcspy_driverAddStream(gcDriver, 0);
+  gcspy_streamInit(stream, 0,
 		   GCSPY_GC_STREAM_INT_TYPE,
 		   "Size",
 		   0, blockSize,
@@ -1171,6 +1305,26 @@ void vspaceDriverInit (gcspy_gc_driver_t *gcDriver,
                    GCSPY_GC_STREAM_PRESENTATION_PLUS,
                    GCSPY_GC_STREAM_PAINT_STYLE_PLAIN, 0,
                    gcspy_colorDBGetColorWithName("Red"));
+
+  stream = gcspy_driverAddStream(gcDriver, 1);
+  gcspy_streamInit(stream, 1,
+		   GCSPY_GC_STREAM_BYTE_TYPE,
+		   "Type",
+		   0, NUM_OBJECT_TYPES,
+		   0, 0,
+		   "Type: ", "",
+                   GCSPY_GC_STREAM_PRESENTATION_ENUM,
+                   GCSPY_GC_STREAM_PAINT_STYLE_PLAIN, 0,
+                   gcspy_colorDBGetColorWithName("Off White"));
+
+  for (int ot = 0; ot < NUM_OBJECT_TYPES; ot++) {
+    gcspy_streamAddEnumName(stream, ot, object_types[ot]);
+  }
+
+  // No clue what is going on there:
+  for (int ot = NUM_OBJECT_TYPES; ot < 10; ot++) {
+    gcspy_streamAddEnumName(stream, ot, "");
+  }
 }
 
 
@@ -1240,6 +1394,12 @@ static void GetNewPage(int node_class)
       page->num_alloc = 0;
       for (int g = 0; g < NUM_OLD_GENERATIONS; ++g) {
         page->num_old[g] = 0;
+      }
+      for (int o = 0; o < NUM_OBJECT_TYPES; o++) {
+        page->num_alloc_t[o] = 0;
+        for (int g = 0; g < NUM_OLD_GENERATIONS; ++g) {
+          page->num_old_t[g][o] = 0;
+        }
       }
     }
 #endif
