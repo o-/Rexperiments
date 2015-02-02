@@ -656,6 +656,7 @@ FUNTAB R_FunTab[] =
 #endif
 
 {"parse",	do_parse,	0,	11,	6,	{PP_FUNCALL, PREC_FN,	0}},
+{"xompile",	do_xompile,	0,	11,	1,	{PP_FUNCALL, PREC_FN,	0}},
 //{"parse_Rd", 	do_parseRd,	0,	11,	7,	{PP_FUNCALL, PREC_FN,	0}},
 //{"deparseRd", 	do_deparseRd, 	0, 	11, 	2,	{PP_FUNCALL, PREC_FN, 	0}},
 //{"parseLatex",  do_parseLatex,  0,      11,     4,      {PP_FUNCALL, PREC_FN,	0}},

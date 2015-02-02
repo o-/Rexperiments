@@ -289,3 +289,4 @@ SEXP attribute_hidden do_parse(SEXP call, SEXP op, SEXP args, SEXP env)
     known_to_be_utf8 = old_utf8;
     return s;
 }
+
