@@ -5,9 +5,10 @@
 #include <xompiler.h>
 #include <bytecode.h>
 
-extern "C" {
+void get_bytecode(const char * args, SEXP * _bce, SEXP * _args) {
 
-  void test_get_bytecode(SEXP * _bce, SEXP * _args) {
+    printf("Got '%s'\n", args);
+
     SEXP bc = PROTECT(NEW_INTEGER(20));
 
     int * bcc = INTEGER(bc);
@@ -47,5 +48,16 @@ extern "C" {
     *_args = arg;
 
     UNPROTECT(6);
+}
+
+
+extern "C" {
+  void xompiler_get_bytecode(SEXP args, SEXP * _bce, SEXP * _args) {
+    if (TYPEOF(CAR(args)) == STRSXP) {
+      get_bytecode(STRING_VALUE(CAR(args)), _bce, _args);
+    } else {
+      *_bce = R_NilValue;
+      *_args = R_NilValue;
+    }
   }
 }

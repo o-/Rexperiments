@@ -40,16 +40,14 @@ SOURCES_C = \
 
 SOURCES_F =  xxxpr.f
 
-SOURCES_CXX = xompiler.cc
-
 ## If the substitutes are needed, the corresponding objects are put by
 ## configure in @LIBOBJS@ @ALLOCA@
 EXTRA_SOURCES_C = \
 	Rmain.c alloca.c mkdtemp.c strdup.c strncasecmp.c
 
-DEPENDS = $(SOURCES_C:.c=.d) $(EXTRA_SOURCES_C:.c=.d) $(SOURCES_CXX:.cc=.d)
-SOURCES = $(SOURCES_C) $(SOURCES_F) $(SOURCES_CXX)
-OBJECTS = $(SOURCES_C:.c=.o) $(SOURCES_F:.f=.o) $(SOURCES_CXX:.cc=.o) @LIBOBJS@ @ALLOCA@
+DEPENDS = $(SOURCES_C:.c=.d) $(EXTRA_SOURCES_C:.c=.d)
+SOURCES = $(SOURCES_C) $(SOURCES_F)
+OBJECTS = $(SOURCES_C:.c=.o) $(SOURCES_F:.f=.o) xompiler/xompiler.a @LIBOBJS@ @ALLOCA@
 HEADERS = \
 	RBufferUtils.h Rstrptime.h \
 	arithmetic.h \
@@ -106,7 +104,7 @@ EXTRA_STATIC_LIBS = \
   $(R_ZLIBS) $(R_BZLIBS) $(R_PCRE) $(R_TRE) $(R_XDR) $(R_XZ) $(R_LIBINTL) $(R_TZONE)
 STATIC_LIBS = $(MAIN_LIBS) $(EXTRA_STATIC_LIBS)
 
-EXTRA_LIBS = $(BLAS_LIBS) $(FLIBS) $(R_XTRA_LIBS) @LIBINTL@ $(READLINE_LIBS) $(LIBS)
+EXTRA_LIBS = $(BLAS_LIBS) $(FLIBS) $(R_XTRA_LIBS) @LIBINTL@ $(READLINE_LIBS) $(LIBS) -lstdc++
 
 R_binary = R.bin
 R_bin_OBJECTS = Rmain.o @WANT_R_SHLIB_FALSE@$(OBJECTS)

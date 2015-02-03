@@ -5850,7 +5850,7 @@ SEXP attribute_hidden do_xompile(SEXP call, SEXP op, SEXP args, SEXP env) {
 
   SEXP bce;
   SEXP arg;
-  test_get_bytecode(&bce, &arg);
+  xompiler_get_bytecode(args, &bce, &arg);
 
   return mkCLOSXP(arg, bce, env);
 }

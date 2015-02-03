@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-  void test_get_bytecode(SEXP * bce, SEXP * args);
+  void xompiler_get_bytecode(SEXP arg, SEXP * bce, SEXP * args);
 
 #ifdef __cplusplus
 }
